@@ -15,6 +15,10 @@
 		4D09B8512FF2A56B0023B86D /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D09B8502FF2A56B0023B86D /* main.m */; };
 		4D76C6592FF31D1D001F8A3A /* CAMView.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D76C6582FF31D1D001F8A3A /* CAMView.m */; };
 		4D76C65B2FF31EFE001F8A3A /* cam_core.c in Sources */ = {isa = PBXBuildFile; fileRef = 4D76C6552FF31BCB001F8A3A /* cam_core.c */; };
+		4D76C6612FF3E4D2001F8A3A /* cam_forth.c in Sources */ = {isa = PBXBuildFile; fileRef = 4D76C6602FF3E4D2001F8A3A /* cam_forth.c */; };
+		4D76C6652FF59102001F8A3A /* CAMEditorWindowController.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D76C6642FF59102001F8A3A /* CAMEditorWindowController.m */; };
+		4D76C66A2FF66226001F8A3A /* CAMPalettePanel.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D76C6692FF66226001F8A3A /* CAMPalettePanel.m */; };
+		4D76C6702FF7B4F7001F8A3A /* test-margolus.c in Sources */ = {isa = PBXBuildFile; fileRef = 4D76C66F2FF7B4F7001F8A3A /* test-margolus.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +37,13 @@
 		4D76C6552FF31BCB001F8A3A /* cam_core.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = cam_core.c; sourceTree = "<group>"; };
 		4D76C6572FF31CB1001F8A3A /* CAMView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CAMView.h; sourceTree = "<group>"; };
 		4D76C6582FF31D1D001F8A3A /* CAMView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CAMView.m; sourceTree = "<group>"; };
+		4D76C65E2FF3E3C3001F8A3A /* cam_forth.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = cam_forth.h; sourceTree = "<group>"; };
+		4D76C6602FF3E4D2001F8A3A /* cam_forth.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = cam_forth.c; sourceTree = "<group>"; };
+		4D76C6632FF590B9001F8A3A /* CAMEditorWindowController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CAMEditorWindowController.h; sourceTree = "<group>"; };
+		4D76C6642FF59102001F8A3A /* CAMEditorWindowController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CAMEditorWindowController.m; sourceTree = "<group>"; };
+		4D76C6682FF661D5001F8A3A /* CAMPalettePanel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CAMPalettePanel.h; sourceTree = "<group>"; };
+		4D76C6692FF66226001F8A3A /* CAMPalettePanel.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CAMPalettePanel.m; sourceTree = "<group>"; };
+		4D76C66F2FF7B4F7001F8A3A /* test-margolus.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "test-margolus.c"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -70,7 +81,14 @@
 				4D76C6552FF31BCB001F8A3A /* cam_core.c */,
 				4D09B8442FF2A5670023B86D /* Document.h */,
 				4D76C6542FF31B31001F8A3A /* cam_core.h */,
+				4D76C6632FF590B9001F8A3A /* CAMEditorWindowController.h */,
+				4D76C6642FF59102001F8A3A /* CAMEditorWindowController.m */,
+				4D76C66F2FF7B4F7001F8A3A /* test-margolus.c */,
 				4D09B8452FF2A5670023B86D /* Document.m */,
+				4D76C65E2FF3E3C3001F8A3A /* cam_forth.h */,
+				4D76C6602FF3E4D2001F8A3A /* cam_forth.c */,
+				4D76C6682FF661D5001F8A3A /* CAMPalettePanel.h */,
+				4D76C6692FF66226001F8A3A /* CAMPalettePanel.m */,
 				4D76C6572FF31CB1001F8A3A /* CAMView.h */,
 				4D76C6582FF31D1D001F8A3A /* CAMView.m */,
 				4D09B8472FF2A5670023B86D /* Document.xib */,
@@ -155,8 +173,12 @@
 				4D76C6592FF31D1D001F8A3A /* CAMView.m in Sources */,
 				4D09B8462FF2A5670023B86D /* Document.m in Sources */,
 				4D09B8512FF2A56B0023B86D /* main.m in Sources */,
+				4D76C6612FF3E4D2001F8A3A /* cam_forth.c in Sources */,
+				4D76C66A2FF66226001F8A3A /* CAMPalettePanel.m in Sources */,
 				4D09B8432FF2A5670023B86D /* AppDelegate.m in Sources */,
 				4D76C65B2FF31EFE001F8A3A /* cam_core.c in Sources */,
+				4D76C6702FF7B4F7001F8A3A /* test-margolus.c in Sources */,
+				4D76C6652FF59102001F8A3A /* CAMEditorWindowController.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

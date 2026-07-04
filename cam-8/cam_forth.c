@@ -1,0 +1,809 @@
+#include "cam_forth.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+void forth_init(ForthVM *vm) {
+    memset(vm, 0, sizeof(ForthVM));
+    vm->sp = 0;
+    vm->dict_size = 0;
+    vm->neighborhood = FORTH_NEIGHBORHOOD_MOORE;
+}
+
+void forth_push(ForthVM *vm, int32_t val) {
+    if (vm->sp < FORTH_STACK_SIZE) {
+        vm->stack[vm->sp++] = val;
+    }
+}
+
+int32_t forth_pop(ForthVM *vm) {
+    if (vm->sp > 0) {
+        return vm->stack[--vm->sp];
+    }
+    return 0;
+}
+
+// N/VONN, tableau 7.2 : les diagonales du plan 0 sont remplacées par les
+// voisins von Neumann du plan 1.
+//   bit0=CENTER bit1=CENTER' bit2=EAST' bit3=WEST' bit4=SOUTH' bit5=NORTH'
+//   bit6=EAST bit7=WEST bit8=SOUTH bit9=NORTH
+void forth_decode_entry_vonn(ForthVM *vm, uint32_t entry) {
+    vm->center       = (entry >> 0) & 1;
+    vm->center_prime = (entry >> 1) & 1;
+    vm->east_p       = (entry >> 2) & 1;
+    vm->west_p       = (entry >> 3) & 1;
+    vm->south_p      = (entry >> 4) & 1;
+    vm->north_p      = (entry >> 5) & 1;
+    vm->east         = (entry >> 6) & 1;
+    vm->west         = (entry >> 7) & 1;
+    vm->south        = (entry >> 8) & 1;
+    vm->north        = (entry >> 9) & 1;
+    // pas de diagonales en N/VONN
+    vm->neast = vm->nwest = vm->seast = vm->swest = 0;
+}
+
+// Décodage Margolus complet : CENTER/CW/CCW/OPP depuis le bloc du plan 0,
+// CENTER'/CW'/CCW'/OPP' depuis celui du plan 1, plus les pseudo-voisins.
+// HORZ/VERT : la cellule (x,y) d'un bloc à la phase p a x = 2bx + p + cx,
+// donc x&1 = p ^ cx (idem verticalement) — les parités spatiales se
+// déduisent du coin et de la phase.
+void forth_decode_margolus_full(ForthVM *vm, uint8_t p0_nibble,
+                                 uint8_t p1_nibble, uint8_t phase,
+                                 uint8_t phase_prime, ForthCorner corner) {
+    uint8_t nw0 = (p0_nibble >> 0) & 1, ne0 = (p0_nibble >> 1) & 1;
+    uint8_t sw0 = (p0_nibble >> 2) & 1, se0 = (p0_nibble >> 3) & 1;
+    uint8_t nw1 = (p1_nibble >> 0) & 1, ne1 = (p1_nibble >> 1) & 1;
+    uint8_t sw1 = (p1_nibble >> 2) & 1, se1 = (p1_nibble >> 3) & 1;
+
+    uint8_t cx, cy;
+    switch (corner) {
+        case FORTH_CORNER_NW:
+            vm->center = nw0; vm->cw = ne0; vm->ccw = sw0; vm->opp = se0;
+            vm->center_prime = nw1; vm->cw_p = ne1; vm->ccw_p = sw1; vm->opp_p = se1;
+            cx = 0; cy = 0;
+            break;
+        case FORTH_CORNER_NE:
+            vm->center = ne0; vm->cw = se0; vm->ccw = nw0; vm->opp = sw0;
+            vm->center_prime = ne1; vm->cw_p = se1; vm->ccw_p = nw1; vm->opp_p = sw1;
+            cx = 1; cy = 0;
+            break;
+        case FORTH_CORNER_SE:
+            vm->center = se0; vm->cw = sw0; vm->ccw = ne0; vm->opp = nw0;
+            vm->center_prime = se1; vm->cw_p = sw1; vm->ccw_p = ne1; vm->opp_p = nw1;
+            cx = 1; cy = 1;
+            break;
+        case FORTH_CORNER_SW:
+        default:
+            vm->center = sw0; vm->cw = nw0; vm->ccw = se0; vm->opp = ne0;
+            vm->center_prime = sw1; vm->cw_p = nw1; vm->ccw_p = se1; vm->opp_p = ne1;
+            cx = 0; cy = 1;
+            break;
+    }
+
+    vm->phase       = phase & 1;
+    vm->phase_prime = phase_prime & 1;
+    // NB : HORZ/VERT supposent que l'origine de la partition suit PHASE
+    // (comme dans ALT-GRID-PH) ; un cycle qui les découple fausserait
+    // ces deux pseudo-voisins.
+    vm->horz = (uint8_t)((phase ^ cx) & 1);
+    vm->vert = (uint8_t)((phase ^ cy) & 1);
+}
+
+// Assigne CENTER/CW/CCW/OPP selon le coin occupé par la cellule courante
+// dans son bloc 2x2, en parcourant les coins dans le sens horaire
+// NW -> NE -> SE -> SW -> NW (cf. livre, §12.5) :
+//   CW  = voisin suivant dans ce sens
+//   CCW = voisin précédent
+//   OPP = coin diagonalement opposé
+void forth_decode_margolus_corner(ForthVM *vm, uint8_t nw, uint8_t ne,
+                                   uint8_t sw, uint8_t se, ForthCorner corner) {
+    switch (corner) {
+        case FORTH_CORNER_NW:
+            vm->center = nw; vm->cw = ne; vm->ccw = sw; vm->opp = se;
+            break;
+        case FORTH_CORNER_NE:
+            vm->center = ne; vm->cw = se; vm->ccw = nw; vm->opp = sw;
+            break;
+        case FORTH_CORNER_SE:
+            vm->center = se; vm->cw = sw; vm->ccw = ne; vm->opp = nw;
+            break;
+        case FORTH_CORNER_SW:
+        default:
+            vm->center = sw; vm->cw = nw; vm->ccw = se; vm->opp = ne;
+            break;
+    }
+}
+
+void forth_decode_entry(ForthVM *vm, uint32_t entry) {
+    vm->center        = (entry >> 0) & 1;
+    vm->center_prime  = (entry >> 1) & 1;
+    vm->north         = (entry >> 2) & 1;
+    vm->south         = (entry >> 3) & 1;
+    vm->east          = (entry >> 4) & 1;
+    vm->west          = (entry >> 5) & 1;
+    vm->neast         = (entry >> 6) & 1;
+    vm->nwest         = (entry >> 7) & 1;
+    vm->seast         = (entry >> 8) & 1;
+    vm->swest         = (entry >> 9) & 1;
+}
+
+static int str_eq(const char *a, const char *b) {
+    return strcmp(a, b) == 0;
+}
+
+static int tokenize(const char *rule, char tokens[FORTH_MAX_TOKENS][32]) {
+    char buf[4096];
+    strncpy(buf, rule, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    int count = 0;
+    char *saveptr = NULL;
+    char *token = strtok_r(buf, " \t\n", &saveptr);
+    while (token != NULL && count < FORTH_MAX_TOKENS) {
+        strncpy(tokens[count], token, 31);
+        tokens[count][31] = '\0';
+        count++;
+        token = strtok_r(NULL, " \t\n", &saveptr);
+    }
+    return count;
+}
+
+static int find_matching_then(char tokens[FORTH_MAX_TOKENS][32], int count, int from) {
+    int depth = 1;
+    for (int i = from; i < count; i++) {
+        if (str_eq(tokens[i], "IF")) depth++;
+        else if (str_eq(tokens[i], "THEN")) {
+            depth--;
+            if (depth == 0) return i;
+        }
+    }
+    return -1;
+}
+
+static int find_matching_else(char tokens[FORTH_MAX_TOKENS][32], int count, int from, int then_idx) {
+    int depth = 1;
+    for (int i = from; i < then_idx; i++) {
+        if (str_eq(tokens[i], "IF")) depth++;
+        else if (str_eq(tokens[i], "THEN")) depth--;
+        else if (str_eq(tokens[i], "ELSE") && depth == 1) return i;
+    }
+    return -1;
+}
+
+static const char *dict_lookup(ForthVM *vm, const char *name) {
+    for (int i = 0; i < vm->dict_size; i++) {
+        if (str_eq(vm->dict[i].name, name)) {
+            return vm->dict[i].body;
+        }
+    }
+    return NULL;
+}
+
+// déclarations forward
+static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int start, int end);
+static int32_t forth_eval_inner(ForthVM *vm, const char *rule);
+
+static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int start, int end) {
+    int i = start;
+    while (i < end) {
+        const char *token = tokens[i];
+
+        // --- commentaire Forth ( ... ) — ignoré, comme dans le livre
+        // (ex: les commentaires de pile "( -- flt)") ---
+        if (token[0] == '(') {
+            while (i < end) {
+                size_t len = strlen(tokens[i]);
+                int closes = (len > 0 && tokens[i][len - 1] == ')');
+                i++;
+                if (closes) break;
+            }
+            continue;
+        }
+
+        // --- contrôle de flux IF/ELSE/THEN ---
+        if (str_eq(token, "IF")) {
+            int then_idx = find_matching_then(tokens, end, i + 1);
+            int else_idx = find_matching_else(tokens, end, i + 1, then_idx);
+
+            int32_t cond = forth_pop(vm);
+
+            if (cond != 0) {
+                int block_end = (else_idx != -1) ? else_idx : then_idx;
+                exec_tokens(vm, tokens, i + 1, block_end);
+            } else if (else_idx != -1) {
+                exec_tokens(vm, tokens, else_idx + 1, then_idx);
+            }
+            i = then_idx + 1;
+            continue;
+        }
+
+        // --- table inline { e0 e1 ... eN } ---
+        // Conforme au Forth du bouquin : les entrées peuvent être des
+        // littéraux OU des mots (U, OPP, 2PART, ...). L'index est dépilé,
+        // puis SEULE l'entrée sélectionnée est évaluée — c'est elle qui
+        // laisse le résultat sur la pile. Permet d'écrire, tel quel :
+        //   CENTER CW CCW OPP + + +  { U OPP 2PART U U }
+        if (str_eq(token, "{")) {
+            int table_start = i + 1;
+            int table_end = table_start;
+            while (table_end < end && !str_eq(tokens[table_end], "}")) {
+                table_end++;
+            }
+            int table_size = table_end - table_start;
+
+            int32_t idx = forth_pop(vm);
+            if (idx >= 0 && idx < table_size) {
+                exec_tokens(vm, tokens, table_start + idx, table_start + idx + 1);
+            } else {
+                forth_push(vm, 0);
+            }
+            i = table_end + 1; // saute le '}'
+            continue;
+        }
+
+        // --- mot utilisateur (dictionnaire) ---
+  
+        {
+            const char *body = dict_lookup(vm, token);
+            if (body) {
+                char word_tokens[FORTH_MAX_TOKENS][32];
+                int word_count = tokenize(body, word_tokens);
+                exec_tokens(vm, word_tokens, 0, word_count);
+                i++;
+                continue;
+            }
+        }
+
+        // --- neighbor words ---
+        if      (str_eq(token, "CENTER"))   forth_push(vm, vm->center);
+        else if (str_eq(token, "CENTER'"))  forth_push(vm, vm->center_prime);
+        else if (str_eq(token, "U")) {
+            forth_push(vm, vm->center);
+        }
+        else if (str_eq(token, "NORTH"))    forth_push(vm, vm->north);
+        else if (str_eq(token, "SOUTH"))    forth_push(vm, vm->south);
+        else if (str_eq(token, "EAST"))     forth_push(vm, vm->east);
+        else if (str_eq(token, "WEST"))     forth_push(vm, vm->west);
+        else if (str_eq(token, "N.EAST"))   forth_push(vm, vm->neast);
+        else if (str_eq(token, "N.WEST"))   forth_push(vm, vm->nwest);
+        else if (str_eq(token, "S.EAST"))   forth_push(vm, vm->seast);
+        else if (str_eq(token, "S.WEST"))   forth_push(vm, vm->swest);
+
+        // --- voisins primés de N/VONN (plan 1, tableau 7.2) ---
+        else if (str_eq(token, "NORTH'"))   forth_push(vm, vm->north_p);
+        else if (str_eq(token, "SOUTH'"))   forth_push(vm, vm->south_p);
+        else if (str_eq(token, "EAST'"))    forth_push(vm, vm->east_p);
+        else if (str_eq(token, "WEST'"))    forth_push(vm, vm->west_p);
+
+        // --- voisins de Margolus (bloc 2x2, §12.5) ---
+        else if (str_eq(token, "CW"))       forth_push(vm, vm->cw);
+        else if (str_eq(token, "CCW"))      forth_push(vm, vm->ccw);
+        else if (str_eq(token, "OPP"))      forth_push(vm, vm->opp);
+
+        // --- voisins primés de Margolus (bloc du plan 1) ---
+        else if (str_eq(token, "CW'"))      forth_push(vm, vm->cw_p);
+        else if (str_eq(token, "CCW'"))     forth_push(vm, vm->ccw_p);
+        else if (str_eq(token, "OPP'"))     forth_push(vm, vm->opp_p);
+
+        // --- pseudo-voisin bruyant (chapitre 8) ---
+        else if (str_eq(token, "RAND"))     forth_push(vm, vm->rnd);
+
+        // --- pseudo-voisins de phase (N/MARG-PH, N/MARG-HV) ---
+        else if (str_eq(token, "PHASE"))    forth_push(vm, vm->phase);
+        else if (str_eq(token, "HORZ"))     forth_push(vm, vm->horz);
+        else if (str_eq(token, "VERT"))     forth_push(vm, vm->vert);
+        else if (str_eq(token, "HV")) {
+            forth_push(vm, vm->horz | (vm->vert << 1));
+        }
+        else if (str_eq(token, "PHASE'")) forth_push(vm, vm->phase_prime);
+        else if (str_eq(token, "PHASES")) {
+            forth_push(vm, vm->phase | (vm->phase_prime << 1));
+        }
+
+        // --- collectifs primé/non-primé (§7.4) ---
+        else if (str_eq(token, "CENTERS")) {
+            forth_push(vm, vm->center | (vm->center_prime << 1));
+        }
+        else if (str_eq(token, "CWS")) {
+            forth_push(vm, vm->cw | (vm->cw_p << 1));
+        }
+        else if (str_eq(token, "CCWS")) {
+            forth_push(vm, vm->ccw | (vm->ccw_p << 1));
+        }
+        else if (str_eq(token, "OPPS")) {
+            forth_push(vm, vm->opp | (vm->opp_p << 1));
+        }
+
+        // --- sondes vers l'autre demi-machine (chapitre 9) ---
+        else if (str_eq(token, "&CENTER"))   forth_push(vm, vm->amp_center);
+        else if (str_eq(token, "&CENTER'"))  forth_push(vm, vm->amp_center_prime);
+        else if (str_eq(token, "&CENTERS")) {
+            forth_push(vm, vm->amp_center | (vm->amp_center_prime << 1));
+        }
+        // alias de lecture selon la source déclarée (§7.3.2) : mêmes fils
+        else if (str_eq(token, "&PHASE"))   forth_push(vm, vm->amp_center);
+        else if (str_eq(token, "&PHASE'"))  forth_push(vm, vm->amp_center_prime);
+        else if (str_eq(token, "&PHASES")) {
+            forth_push(vm, vm->amp_center | (vm->amp_center_prime << 1));
+        }
+        else if (str_eq(token, "&HORZ"))    forth_push(vm, vm->amp_center);
+        else if (str_eq(token, "&VERT"))    forth_push(vm, vm->amp_center_prime);
+        else if (str_eq(token, "&HV")) {
+            forth_push(vm, vm->amp_center | (vm->amp_center_prime << 1));
+        }
+
+        // --- autres voisinages mineurs &... non câblés (ex. &PHASE) ---
+        else if (token[0] == '&') {
+            static int warned_camb_probe = 0;
+            if (!warned_camb_probe) {
+                fprintf(stderr, "CAM-FORTH: %s — sonde mineure non câblée, "
+                                "vaut toujours 0.\n", token);
+                warned_camb_probe = 1;
+            }
+            forth_push(vm, 0);
+        }
+
+        // --- opérateurs logiques ---
+        else if (str_eq(token, "XOR")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, a ^ b);
+        }
+        else if (str_eq(token, "AND")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, a & b);
+        }
+        else if (str_eq(token, "OR")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, a | b);
+        }
+        else if (str_eq(token, "NOT")) {
+            int32_t a = forth_pop(vm);
+            forth_push(vm, (a == 0) ? 1 : 0);
+        }
+
+        // --- arithmétique ---
+        else if (str_eq(token, "2*")) {
+            forth_push(vm, forth_pop(vm) << 1);
+        }
+        else if (str_eq(token, "2/")) {
+            forth_push(vm, forth_pop(vm) >> 1);
+        }
+        else if (str_eq(token, "+")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, a + b);
+        }
+        else if (str_eq(token, "-")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, a - b);
+        }
+
+        // --- stack manipulation ---
+        else if (str_eq(token, "DUP")) {
+            int32_t a = forth_pop(vm);
+            forth_push(vm, a);
+            forth_push(vm, a);
+        }
+        else if (str_eq(token, "DROP")) {
+            forth_pop(vm);
+        }
+        else if (str_eq(token, "SWAP")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, b);
+            forth_push(vm, a);
+        }
+        else if (str_eq(token, "OVER")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, a);
+            forth_push(vm, b);
+            forth_push(vm, a);
+        }
+
+        // --- comparaisons ---
+        else if (str_eq(token, "=")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, (a == b) ? 1 : 0);
+        }
+        else if (str_eq(token, "<>")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, (a != b) ? 1 : 0);
+        }
+
+        // --- expédition vers les plans (§5.4) : >PLNn dépile la valeur
+        // et la destine au plan n. >PLNO (lettre O) = graphie OCR de >PLN0.
+        else if (str_eq(token, ">PLN0") || str_eq(token, ">PLNO")) {
+            vm->out_val[0] = (forth_pop(vm) != 0) ? 1 : 0;
+            vm->out_mask |= 0x1;
+        }
+        else if (str_eq(token, ">PLN1")) {
+            vm->out_val[1] = (forth_pop(vm) != 0) ? 1 : 0;
+            vm->out_mask |= 0x2;
+        }
+        else if (str_eq(token, ">PLN2")) {
+            vm->out_val[2] = (forth_pop(vm) != 0) ? 1 : 0;
+            vm->out_mask |= 0x4;
+        }
+        else if (str_eq(token, ">PLN3")) {
+            vm->out_val[3] = (forth_pop(vm) != 0) ? 1 : 0;
+            vm->out_mask |= 0x8;
+        }
+        // >PLNA / >PLNB : expédie une valeur 2 bits vers la PAIRE de plans
+        // de la demi-machine (A: plans 0-1, B: plans 2-3). Utilisé par les
+        // compteurs du chapitre 9 (ex. le chrono des TUBE-WORMS).
+        else if (str_eq(token, ">PLNA")) {
+            int32_t v = forth_pop(vm);
+            vm->out_val[0] = v & 1;
+            vm->out_val[1] = (v >> 1) & 1;
+            vm->out_mask |= 0x3;
+        }
+        else if (str_eq(token, ">PLNB")) {
+            int32_t v = forth_pop(vm);
+            vm->out_val[2] = v & 1;
+            vm->out_val[3] = (v >> 1) & 1;
+            vm->out_mask |= 0xC;
+        }
+
+        // --- nombre littéral ---
+        else {
+            char *endptr;
+            long val = strtol(token, &endptr, 10);
+            if (*endptr == '\0') {
+                forth_push(vm, (int32_t)val);
+            } else {
+                fprintf(stderr, "CAM-FORTH: mot inconnu '%s'\n", token);
+            }
+        }
+
+        i++;
+    }
+}
+
+static int32_t forth_eval_inner(ForthVM *vm, const char *rule) {
+    char tokens[FORTH_MAX_TOKENS][32];
+    int count = tokenize(rule, tokens);
+    exec_tokens(vm, tokens, 0, count);
+    return forth_pop(vm);
+}
+
+int32_t forth_eval(ForthVM *vm, const char *rule) {
+    vm->sp = 0;  // reset seulement au niveau top
+    return forth_eval_inner(vm, rule);
+}
+
+// prototypes des builders (définis plus bas, utilisés par make_table)
+static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body);
+
+void make_table(uint8_t *lut, const char *rule) {
+    ForthVM vm;
+    forth_init(&vm);
+    build_lut_from_body(&vm, lut, rule);
+}
+
+// --- helpers de construction, partagés par MAKE-TABLE (§ dispatch) ---
+
+// Avertissement unique si une règle expédie vers les plans 2/3 (CAM-B).
+static void warn_camb_if_needed(uint8_t used_mask) {
+    static int warned = 0;
+    if ((used_mask & 0xC) && !warned) {
+        fprintf(stderr, "CAM-FORTH: >PLN2/>PLN3 — ces plans appartiennent à "
+                        "CAM-B ; en mode Margolus l'expédition est ignorée "
+                        "(utilisez une section CAM-B en mode LUT).\n");
+        warned = 1;
+    }
+}
+
+// LUT Moore ou VONN, 2 bits par entrée : bit0 = plan 0, bit1 = plan 1.
+// Plan 0 : valeur de >PLN0, ou à défaut le sommet de pile (compatibilité
+// avec les règles qui se terminent par une expression nue).
+// Plan 1 : valeur de >PLN1, ou à défaut l'ECHO (= CENTER), qui reproduit
+// le comportement historique du moteur.
+// Construit la LUT d'une demi-machine. Pour CAM-A, la sortie 2 bits est
+// (plan 0, plan 1) — expédiée par >PLN0/>PLN1/>PLNA ; pour CAM-B c'est
+// (plan 2, plan 3) — expédiée par >PLN2/>PLN3/>PLNB. Dans les deux cas,
+// CENTER etc. désignent les plans PROPRES de la moitié, et &CENTER /
+// &CENTER' les centres de l'autre moitié (bits 11-12 de l'entrée).
+static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
+    int half = vm->half; // 0 = CAM-A, 1 = CAM-B
+    int lo = half ? 2 : 0;             // slot du plan "bas" de la paire
+    uint8_t lo_bit = half ? 0x4 : 0x1; // bits correspondants de out_mask
+    uint8_t hi_bit = half ? 0x8 : 0x2;
+    int vonn = (vm->neighborhood == FORTH_NEIGHBORHOOD_VONN);
+
+    for (uint32_t entry = 0; entry < FORTH_LUT_SIZE; entry++) {
+        if (vonn) forth_decode_entry_vonn(vm, entry & 0x3FF);
+        else      forth_decode_entry(vm, entry & 0x3FF);
+        vm->rnd              = (entry >> 10) & 1; // RAND (chapitre 8)
+        vm->amp_center       = (entry >> 11) & 1; // &CENTER  (chapitre 9)
+        vm->amp_center_prime = (entry >> 12) & 1; // &CENTER'
+        vm->sp = 0;
+        vm->out_mask = 0;
+
+        char word_tokens[FORTH_MAX_TOKENS][32];
+        int word_count = tokenize(body, word_tokens);
+        exec_tokens(vm, word_tokens, 0, word_count);
+
+        uint8_t plo = (vm->out_mask & lo_bit) ? vm->out_val[lo]
+                                              : ((forth_pop(vm) != 0) ? 1 : 0);
+        uint8_t phi = (vm->out_mask & hi_bit) ? vm->out_val[lo + 1]
+                                              : vm->center; // ECHO par défaut
+
+        lut[entry] = plo | (phi << 1);
+    }
+}
+
+// Tables de bloc Margolus complètes (FORTH_MARG_TABLE_SIZE entrées) :
+// index = nibble plan 0 | nibble plan 1 << 4 | PHASE << 8. Sorties :
+//  - p0_table : nouveau bloc du plan 0 ;
+//  - p1_table : nouveau bloc du plan 1 si la règle expédie >PLN1
+//    (sinon *p1_used reste 0 et le moteur fait traverser le plan 1
+//    inchangé). Si >PLN1 n'est expédié que sur certains chemins IF/ELSE,
+//    les cellules non expédiées reçoivent 0.
+static void build_margolus_from_body(ForthVM *vm,
+                                     uint8_t *p0_table,
+                                     uint8_t *p1_table,
+                                     int *p1_used,
+                                     const char *body) {
+    static const ForthCorner corners[4] = {
+        FORTH_CORNER_NW, FORTH_CORNER_NE, FORTH_CORNER_SW, FORTH_CORNER_SE
+    };
+    char word_tokens[FORTH_MAX_TOKENS][32];
+    int word_count = tokenize(body, word_tokens);
+    uint8_t used_mask = 0;
+
+    *p1_used = 0;
+
+    for (uint32_t idx = 0; idx < FORTH_MARG_TABLE_SIZE; idx++) {
+        uint8_t p0_nibble = idx & 0xF;
+        uint8_t p1_nibble = (idx >> 4) & 0xF;
+        uint8_t phase     = (idx >> 8) & 1;
+        uint8_t rnd       = (idx >> 9) & 1;
+        uint8_t phase_p   = (idx >> 10) & 1;
+        uint8_t out_p0 = 0;
+        uint8_t out_p1 = 0;
+
+        for (int c = 0; c < 4; c++) {
+            forth_decode_margolus_full(vm, p0_nibble, p1_nibble, phase, phase_p, corners[c]);
+            vm->rnd = rnd; // bit RAND commun au bloc (chapitre 8)
+            vm->sp = 0;
+            vm->out_mask = 0;
+            exec_tokens(vm, word_tokens, 0, word_count);
+
+            uint8_t p0 = (vm->out_mask & 0x1) ? vm->out_val[0]
+                                              : ((forth_pop(vm) != 0) ? 1 : 0);
+            out_p0 |= (p0 << c);
+
+            if (vm->out_mask & 0x2) {
+                out_p1 |= (vm->out_val[1] << c);
+                *p1_used = 1;
+            }
+            used_mask |= vm->out_mask;
+        }
+
+        p0_table[idx] = out_p0;
+        p1_table[idx] = out_p1;
+    }
+
+    warn_camb_if_needed(used_mask);
+}
+
+int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
+    char tokens[FORTH_MAX_TOKENS][32];
+    char buf[4096];
+    strncpy(buf, source, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    int count = 0;
+    char *tok = strtok(buf, " \t\n");
+    while (tok != NULL && count < FORTH_MAX_TOKENS) {
+        strncpy(tokens[count], tok, 31);
+        tokens[count][31] = '\0';
+        count++;
+        tok = strtok(NULL, " \t\n");
+    }
+
+    int built = 0;
+    int i = 0;
+
+    while (i < count) {
+
+        // --- commentaire Forth ( ... ) — ignoré partout, y compris
+        // avant/entre les définitions ---
+        if (tokens[i][0] == '(') {
+            while (i < count) {
+                size_t len = strlen(tokens[i]);
+                int closes = (len > 0 && tokens[i][len - 1] == ')');
+                i++;
+                if (closes) break;
+            }
+            continue;
+        }
+
+        // --- définition : NOM ... ; ---
+        if (str_eq(tokens[i], ":")) {
+            i++;
+            if (i >= count) break;
+
+            char word_name[FORTH_WORD_MAXLEN];
+            strncpy(word_name, tokens[i], FORTH_WORD_MAXLEN - 1);
+            word_name[FORTH_WORD_MAXLEN - 1] = '\0';
+            i++;
+
+            char body[FORTH_BODY_MAXLEN];
+            body[0] = '\0';
+            while (i < count && !str_eq(tokens[i], ";")) {
+                if (strlen(body) + strlen(tokens[i]) + 2 < FORTH_BODY_MAXLEN) {
+                    if (body[0] != '\0') strcat(body, " ");
+                    strcat(body, tokens[i]);
+                }
+                i++;
+            }
+            i++; // saute le ;
+
+            // ajoute ou remplace dans le dictionnaire
+            int found = 0;
+            for (int d = 0; d < vm->dict_size; d++) {
+                if (str_eq(vm->dict[d].name, word_name)) {
+                    strncpy(vm->dict[d].body, body, FORTH_BODY_MAXLEN - 1);
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && vm->dict_size < FORTH_DICT_SIZE) {
+                strncpy(vm->dict[vm->dict_size].name, word_name, FORTH_WORD_MAXLEN - 1);
+                strncpy(vm->dict[vm->dict_size].body, body, FORTH_BODY_MAXLEN - 1);
+                vm->dict_size++;
+            }
+            continue;
+        }
+
+        // --- run-cycle (§11.5) : CYCLE ... END-CYCLE ---
+        // Lignes "valeur IS <registre>", un STEP clôt chaque pas.
+        // Registres : <ORG-HV> (0 = grille paire, 3 = impaire),
+        // <PHASE>, <PHASE'>, <PHASES> (réglage joint 2 bits).
+        if (str_eq(tokens[i], "CYCLE")) {
+            i++;
+            int32_t pending = 0;
+            uint8_t org = 0, ph = 0, php = 0;
+            int len = 0;
+            while (i < count && !str_eq(tokens[i], "END-CYCLE")) {
+                if (str_eq(tokens[i], "IS")) {
+                    i++;
+                    if (i >= count) break;
+                    const char *reg = tokens[i];
+                    if      (str_eq(reg, "<PHASE>"))  ph  = pending & 1;
+                    else if (str_eq(reg, "<PHASE'>")) php = pending & 1;
+                    else if (str_eq(reg, "<PHASES>")) {
+                        ph = pending & 1; php = (pending >> 1) & 1;
+                    }
+                    else if (str_eq(reg, "<ORG-HV>")) {
+                        if (pending == 0)      org = 0;
+                        else if (pending == 3) org = 1;
+                        else {
+                            fprintf(stderr, "CAM-FORTH: <ORG-HV> %d — seuls "
+                                    "0 et 3 (décalage diagonal) sont câblés ; "
+                                    "traité comme %d.\n",
+                                    pending, pending ? 1 : 0);
+                            org = pending ? 1 : 0;
+                        }
+                    }
+                    else {
+                        fprintf(stderr, "CAM-FORTH: registre %s non câblé "
+                                "dans le run-cycle.\n", reg);
+                    }
+                } else if (str_eq(tokens[i], "STEP")) {
+                    if (tables && len < FORTH_CYCLE_MAX) {
+                        tables->cycle[len].org         = org;
+                        tables->cycle[len].phase       = ph;
+                        tables->cycle[len].phase_prime = php;
+                        len++;
+                    }
+                } else {
+                    char *endp;
+                    long v = strtol(tokens[i], &endp, 10);
+                    if (*endp == '\0') pending = (int32_t)v;
+                }
+                i++;
+            }
+            if (tables) tables->cycle_len = len;
+            i++; // saute END-CYCLE
+            continue;
+        }
+
+        // --- sections de demi-machine (chapitre 9) ---
+        if (str_eq(tokens[i], "CAM-A")) { vm->half = 0; i++; continue; }
+        if (str_eq(tokens[i], "CAM-B")) { vm->half = 1; i++; continue; }
+        // Déclarations du voisinage mineur (§7.3.2) : choisissent ce que
+        // transportent les deux fils de sonde de la moitié COURANTE.
+        if (str_eq(tokens[i], "&/CENTERS") || str_eq(tokens[i], "&/CENTER")) {
+            if (tables) {
+                if (vm->half) tables->probe_source_b = FORTH_PROBE_CENTERS;
+                else          tables->probe_source_a = FORTH_PROBE_CENTERS;
+            }
+            i++; continue;
+        }
+        if (str_eq(tokens[i], "&/PHASES")) {
+            if (tables) {
+                if (vm->half) tables->probe_source_b = FORTH_PROBE_PHASES;
+                else          tables->probe_source_a = FORTH_PROBE_PHASES;
+            }
+            i++; continue;
+        }
+        if (str_eq(tokens[i], "&/HV")) {
+            if (tables) {
+                if (vm->half) tables->probe_source_b = FORTH_PROBE_HV;
+                else          tables->probe_source_a = FORTH_PROBE_HV;
+            }
+            i++; continue;
+        }
+
+        // --- déclarations de voisinage (§7.3 du livre) ---
+        // N/MOORE : Moore 3x3 (défaut). N/VONN : von Neumann (voisins
+        // primés du plan 1). N/MARG : Margolus, blocs 2x2. Les variantes
+        // N/MARG-PH et N/MARG-HV sont acceptées : PHASE, HORZ et VERT
+        // sont de toute façon disponibles en mode Margolus.
+        if (str_eq(tokens[i], "N/MOORE")) {
+            vm->neighborhood = FORTH_NEIGHBORHOOD_MOORE;
+            i++;
+            continue;
+        }
+        if (str_eq(tokens[i], "N/VONN")) {
+            vm->neighborhood = FORTH_NEIGHBORHOOD_VONN;
+            i++;
+            continue;
+        }
+        if (str_eq(tokens[i], "N/MARG") || str_eq(tokens[i], "N/MARGOLUS") ||
+            str_eq(tokens[i], "N/MARG-PH") || str_eq(tokens[i], "N/MARG-HV")) {
+            vm->neighborhood = FORTH_NEIGHBORHOOD_MARGOLUS;
+            i++;
+            continue;
+        }
+
+        // --- MAKE-TABLE NOM ---
+        // Construit la table du voisinage COURANT, comme dans le vrai
+        // CAM Forth : N/MOORE → LUT 10 bits, N/MARG → table de bloc 2x2.
+        // MAKE-TABLE-MARGOLUS reste accepté comme raccourci historique
+        // (équivaut à N/MARG puis MAKE-TABLE, sans changer la déclaration
+        // courante pour la suite de la source).
+        if (str_eq(tokens[i], "MAKE-TABLE") || str_eq(tokens[i], "MAKE-TABLE-MARGOLUS")) {
+            int force_margolus = str_eq(tokens[i], "MAKE-TABLE-MARGOLUS");
+            i++;
+            if (i >= count) break;
+
+            const char *body = dict_lookup(vm, tokens[i]);
+            if (!body) {
+                fprintf(stderr, "CAM-FORTH: MAKE-TABLE - mot '%s' inconnu\n", tokens[i]);
+                i++;
+                continue;
+            }
+
+            int margolus = force_margolus ||
+                           (vm->neighborhood == FORTH_NEIGHBORHOOD_MARGOLUS);
+
+            if (margolus && tables) {
+                if (vm->half == 1) {
+                    fprintf(stderr, "CAM-FORTH: Margolus non supporté en "
+                                    "CAM-B — table ignorée.\n");
+                } else {
+                    build_margolus_from_body(vm, tables->margolus_p0,
+                                              tables->margolus_p1,
+                                              &tables->margolus_p1_used, body);
+                    built |= FORTH_BUILT_MARGOLUS;
+                }
+            } else if (!margolus && tables) {
+                if (vm->half == 1) {
+                    build_lut_from_body(vm, tables->lut_b, body);
+                    tables->lut_b_neighborhood = vm->neighborhood;
+                    built |= FORTH_BUILT_LUT_B;
+                } else {
+                    build_lut_from_body(vm, tables->lut, body);
+                    tables->lut_neighborhood = vm->neighborhood;
+                    built |= FORTH_BUILT_LUT;
+                }
+            }
+            i++;
+            continue;
+        }
+        i++;
+    }
+
+    return built;
+}
