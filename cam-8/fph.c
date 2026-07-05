@@ -1,5 +1,5 @@
 //
-//  fhp.c
+//  fhp.c 
 //  cam-8 — chapitre 16
 //
 //  Implementation isolee. Duplique volontairement une petite fonction
