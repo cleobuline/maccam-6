@@ -27,6 +27,10 @@ static const char *RULE_TIME_TUNNEL =
     NSString *_currentRuleSource; // dernière règle compilée avec succès, pour survivre à un changement de taille
     FHPState *_fhp; // sous-systeme gaz FHP (chapitre 16), independant de _cam
     NSTextField *_videoScaleField; // "auto" ou une valeur numerique (0.5, 2, 3...)
+    CAMState *_exportCam; // non-NULL PENDANT un export en cours ; permet a
+                          // compileRule: de resynchroniser le clone avec
+                          // la grille visible (voir _exportVideoDurationSeconds:)
+    BOOL _pendingExportReverse; // LE SIGNAL SYNCHRONE
 }
 @property (nonatomic, assign) BOOL isRunning;@end
 
@@ -188,25 +192,23 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         if (strongSelf) strongSelf->_frameInterval = 1.0 / (double)fps;
     };
     palette.onReverse = ^(void) {
-        Document *strongSelf = weakSelf;
-        if (!strongSelf || !strongSelf->_cam) return;
+            Document *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf->_cam) return;
 
-        if (cam_can_reverse()) {
-            // Mode Margolus inversible (chapitre 14) : le bouton inverse la
-            // FLÈCHE DU TEMPS — la simulation recule tant qu'on ne rappuie
-            // pas. La grille n'est pas touchée ici : c'est le tick qui
-            // choisit cam_step ou cam_step_back.
-            strongSelf->_timeReversed = !strongSelf->_timeReversed;
-        } else {
-            // Mode LUT (règles du second ordre, ex. TIME-TUNNEL) : échanger
-            // présent (plan 0) et passé (plan 1) inverse le temps.
-            uint8_t *tmp = strongSelf->_cam->plane0_a;
-            strongSelf->_cam->plane0_a = strongSelf->_cam->plane1_a;
-            strongSelf->_cam->plane1_a = tmp;
-            [strongSelf->_camView renderFrame];
-        }
-    };
-    [palette showPalette];
+            if (cam_can_reverse()) {
+                // Mode Margolus (chapitre 14)
+                strongSelf->_timeReversed = !strongSelf->_timeReversed;
+            } else {
+                // Mode LUT : échanger présent et passé inverse le temps
+                uint8_t *tmp = strongSelf->_cam->plane0_a;
+                strongSelf->_cam->plane0_a = strongSelf->_cam->plane1_a;
+                strongSelf->_cam->plane1_a = tmp;
+                [strongSelf->_camView renderFrame];
+                
+                // Transmission immédiate au clone d'export vidéo
+                strongSelf->_pendingExportReverse = YES;
+            }
+        };    [palette showPalette];
     // Dans Document.m
 
     _camView.palette = palette; // <--- AJOUTER CETTE LIGNE
@@ -301,6 +303,22 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     _timeReversed = NO; // nouvelle règle : le temps repart vers l'avant
     _currentRuleSource = [self.ruleTextView.string copy];
     cam_set_rule([_currentRuleSource UTF8String]);
+
+    // Si un export tourne en tache de fond, on lui donne aussi le
+    // contenu ACTUEL de la grille visible : sans ca, Effacer tout /
+    // Lancer sur la grille live ne change rien a la video, qui continue
+    // d'evoluer sur son propre contenu clone au demarrage de l'export.
+    // C'est ce qui permet d'enchainer plusieurs simulations distinctes
+    // dans un seul export : Stop, Effacer/Lancer, Compiler (resynchro
+    // ici), Play -- et la video repart sur la nouvelle simulation.
+    if (_exportCam && _exportCam->width == _cam->width && _exportCam->height == _cam->height) {
+        uint32_t total = _cam->width * _cam->height;
+        memcpy(_exportCam->plane0_a, _cam->plane0_a, total);
+        memcpy(_exportCam->plane1_a, _cam->plane1_a, total);
+        memcpy(_exportCam->plane2_a, _cam->plane2_a, total);
+        memcpy(_exportCam->plane3_a, _cam->plane3_a, total);
+        _exportCam->margolus_phase = _cam->margolus_phase;
+    }
 }
 
 #pragma mark - Export vidéo
@@ -348,6 +366,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         [self _showExportAlertWithMessage:@"Impossible d'allouer la grille d'export."];
         return;
     }
+    _exportCam = exportCam; // rendu visible a compileRule: pour la resynchro
     uint32_t total = _cam->width * _cam->height;
     memcpy(exportCam->plane0_a, _cam->plane0_a, total);
     memcpy(exportCam->plane1_a, _cam->plane1_a, total);
@@ -361,6 +380,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     AVAssetWriter *writer = [AVAssetWriter assetWriterWithURL:url fileType:AVFileTypeMPEG4 error:&error];
     if (!writer) {
         cam_destroy(exportCam);
+        _exportCam = NULL;
         [self _showExportAlertWithMessage:error.localizedDescription ?: @"Échec de création du writer vidéo."];
         return;
     }
@@ -370,11 +390,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     uint32_t w = exportCam->width;
     uint32_t h = exportCam->height;
 
-    // Échelle : "auto" vise ~768 px de côté comme avant (tient dans un
-    // écran 1280x800 en plein écran) ; sinon la valeur tapée dans le
-    // champ (0.5, 1, 2, 3...) multiplie directement la taille NATIVE
-    // de la grille — permet aussi bien un export allégé (0.5x) qu'un
-    // agrandissement supérieur à 3x.
     NSString *scaleText = [_videoScaleField.stringValue stringByTrimmingCharactersInSet:
                             [NSCharacterSet whitespaceCharacterSet]];
     double scale;
@@ -383,15 +398,15 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         scale = (autoScale < 1.0) ? 1.0 : autoScale;
     } else {
         scale = [scaleText doubleValue];
-        if (scale <= 0.0) scale = 1.0; // saisie invalide (texte, zéro, négatif) : repli sûr
-        if (scale > 8.0) scale = 8.0;   // garde-fou : évite une vidéo démesurée par erreur de frappe
+        if (scale <= 0.0) scale = 1.0;
+        if (scale > 8.0) scale = 8.0;
     }
 
     uint32_t vw = (uint32_t)round(w * scale);
     uint32_t vh = (uint32_t)round(h * scale);
-    if (vw < 16) vw = 16; // garde-fou : jamais une vidéo degenerée (ex. 0.01x)
+    if (vw < 16) vw = 16;
     if (vh < 16) vh = 16;
-    if (vw % 2 != 0) vw += 1; // H.264 exige des dimensions paires
+    if (vw % 2 != 0) vw += 1;
     if (vh % 2 != 0) vh += 1;
 
     NSDictionary *videoSettings = @{
@@ -424,6 +439,16 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         if (!strongSelf) { cam_destroy(exportCam); return; }
 
         while (input.isReadyForMoreMediaData && frameIndex < totalFrames) {
+            
+            // --- INTERCEPTION DU FLUX TEMPOREL DE L'EXPORT ---
+            if (strongSelf->_pendingExportReverse) {
+                uint8_t *tmpExport = exportCam->plane0_a;
+                exportCam->plane0_a = exportCam->plane1_a;
+                exportCam->plane1_a = tmpExport;
+                strongSelf->_pendingExportReverse = NO; // Signal consommé
+            }
+            // -------------------------------------------------
+
             CVPixelBufferRef pixelBuffer = NULL;
             CVPixelBufferPoolCreatePixelBuffer(NULL, adaptor.pixelBufferPool, &pixelBuffer);
             if (!pixelBuffer) break;
@@ -434,7 +459,13 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
             [adaptor appendPixelBuffer:pixelBuffer withPresentationTime:frameTime];
             CVPixelBufferRelease(pixelBuffer);
 
-            cam_step(exportCam); // avance le CLONE, jamais la grille visible
+            if (strongSelf.isRunning) {
+                if (strongSelf->_timeReversed && cam_can_reverse()) {
+                    cam_step_back(exportCam);
+                } else {
+                    cam_step(exportCam);
+                }
+            }
             frameIndex++;
         }
 
@@ -442,6 +473,8 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
             [input markAsFinished];
             [writer finishWritingWithCompletionHandler:^{
                 cam_destroy(exportCam);
+                Document *doneSelf = weakSelf;
+                if (doneSelf) doneSelf->_exportCam = NULL;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (writer.status == AVAssetWriterStatusFailed) {
                         [weakSelf _showExportAlertWithMessage:writer.error.localizedDescription ?: @"Échec de l'écriture vidéo."];
@@ -451,7 +484,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         }
     }];
 }
-
 // scale a virgule (0.5, 1, 2, 3...) : echantillonnage au plus proche
 // voisin dans les DEUX directions plutot que la replication de blocs
 // entiers — generalise proprement a l'agrandissement ET a la reduction
