@@ -16,6 +16,7 @@
 @property (strong) NSTextField *densityField;
 @property (strong) NSPopUpButton *planePopup;
 @property (strong) NSPopUpButton *sizePopup;
+@property (strong) NSTextField   *fpsField;
 @property (strong) NSButton    *reverseBtn;
 @property (strong) NSButton    *playPauseBtn;
 @property (strong) NSButton    *randomizeBtn;
@@ -35,7 +36,7 @@
 }
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(900, 400, 190, 486);
+    NSRect frame = NSMakeRect(900, 400, 190, 526);
     self = [super initWithContentRect:frame
                             styleMask:NSWindowStyleMaskTitled |
                                       NSWindowStyleMaskClosable |
@@ -61,7 +62,7 @@
 
 - (void)_buildUI {
     NSView *v = self.contentView;
-    CGFloat y = 446;
+    CGFloat y = 486;
     CGFloat x = 10;
     CGFloat w = 170;
 
@@ -75,6 +76,20 @@
     _sizePopup.target = self;
     _sizePopup.action = @selector(_gridSizeChanged:);
     [v addSubview:_sizePopup];
+    y -= 38;
+
+    // --- FPS ---
+    [self _addLabel:@"FPS (débit de simulation)" x:x y:y w:w view:v];
+    y -= 24;
+
+    _fpsField = [NSTextField textFieldWithString:@"30"];
+    _fpsField.frame = NSMakeRect(x, y, 50, 22);
+    [v addSubview:_fpsField];
+
+    NSButton *fpsApply = [NSButton buttonWithTitle:@"Appliquer"
+                                             target:self action:@selector(_fpsChanged:)];
+    fpsApply.frame = NSMakeRect(x+58, y-2, 104, 26);
+    [v addSubview:fpsApply];
     y -= 38;
 
     // --- OUTILS ---
@@ -216,6 +231,14 @@
 - (void)_sizeChanged:(NSSlider *)sender {
     _brushSize = (int)sender.intValue;
     _sizeLabel.stringValue = [NSString stringWithFormat:@"%d", _brushSize];
+}
+
+- (void)_fpsChanged:(id)sender {
+    int fps = _fpsField.intValue;
+    if (fps < 1) fps = 1;
+    if (fps > 60) fps = 60; // au-delà, CVDisplayLink ne suit plus le rafraîchissement réel
+    _fpsField.stringValue = [NSString stringWithFormat:@"%d", fps];
+    if (self.onFPSChange) self.onFPSChange(fps);
 }
 
 - (void)_planeChanged:(NSPopUpButton *)sender {

@@ -32,6 +32,7 @@ typedef NS_ENUM(NSInteger, CAMTool) {
 @property (nonatomic, copy) void (^onClear)(void);
 // mode: 128, 256, 512 ou 1024
 @property (nonatomic, copy) void (^onSizeChange)(int size);
+@property (nonatomic, copy) void (^onFPSChange)(int fps);
 
 + (instancetype)sharedPalette;
 - (void)showPalette;

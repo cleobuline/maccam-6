@@ -21,6 +21,7 @@ static const char *RULE_TIME_TUNNEL =
     CVDisplayLinkRef _displayLink;
     CFTimeInterval _lastFrameTime;
     BOOL _timeReversed; // YES = la simulation recule (chapitre 14)
+    CFTimeInterval _frameInterval; // 1.0/fps — réglable via la palette
     NSString *_pendingRuleSource; // règle lue depuis un fichier avant que la fenêtre existe
     NSString *_currentRuleSource; // dernière règle compilée avec succès, pour survivre à un changement de taille
 }
@@ -39,6 +40,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     if (self) {
         _cam = cam_create(CAM_SIZE_256);
         _isRunning = NO; // en pause au départ — l'utilisateur décide quand lancer
+        _frameInterval = 1.0 / 30.0; // 30 fps par défaut, comme avant
         cam_set_rule(RULE_TIME_TUNNEL);
     }
     return self;
@@ -164,6 +166,10 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     palette.onSizeChange = ^(int newSize) {
         [weakSelf _recreateGridAtSize:newSize];
     };
+    palette.onFPSChange = ^(int fps) {
+        Document *strongSelf = weakSelf;
+        if (strongSelf) strongSelf->_frameInterval = 1.0 / (double)fps;
+    };
     palette.onReverse = ^(void) {
         Document *strongSelf = weakSelf;
         if (!strongSelf || !strongSelf->_cam) return;
@@ -236,7 +242,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 }
 
 - (void)_displayLinkTick {
-    if (CACurrentMediaTime() - _lastFrameTime < (1.0 / 30.0)) return;
+    if (CACurrentMediaTime() - _lastFrameTime < _frameInterval) return;
     _lastFrameTime = CACurrentMediaTime();
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.isRunning) {
