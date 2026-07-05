@@ -20,6 +20,8 @@ static inline uint32_t rng_next(void) {
 static inline uint8_t rng_bit(void) { return (uint8_t)(rng_next() & 1); }
 
 static uint8_t g_lut[FORTH_LUT_SIZE];
+static uint8_t g_lut_hex[FORTH_HEX_LUT_SIZE];
+static int     g_lut_hex_ready = 0;
 static int     g_lut_ready = 0;
 
 static CAMStepMode g_step_mode = CAM_MODE_LUT;
@@ -150,10 +152,16 @@ void cam_apply_forth_tables(const ForthTables *tables, int built) {
         margolus_compute_inverse();
     }
     if (built & FORTH_BUILT_LUT) {
-        memcpy(g_lut, tables->lut, FORTH_LUT_SIZE);
-        g_lut_neighborhood = tables->lut_neighborhood;
-        g_lut_ready = 1;
-        g_step_mode = CAM_MODE_LUT;
+        if (tables->lut_neighborhood == FORTH_NEIGHBORHOOD_HEX) {
+            memcpy(g_lut_hex, tables->lut, FORTH_HEX_LUT_SIZE);
+            g_lut_hex_ready = 1;
+            g_step_mode = CAM_MODE_HEX;
+        } else {
+            memcpy(g_lut, tables->lut, FORTH_LUT_SIZE);
+            g_lut_neighborhood = tables->lut_neighborhood;
+            g_lut_ready = 1;
+            g_step_mode = CAM_MODE_LUT;
+        }
     }
     // La source décrit toute la machine : CAM-B n'est active que si cette
     // compilation a construit sa table.
@@ -575,9 +583,72 @@ int cam_step_back(CAMState *cam) {
     return 1;
 }
 
+// N/HEX (chapitre 16, FHP) : grille pseudo-hexagonale par decalage en
+// quinconce ("brickwork", encodage even-r classique). Les lignes paires
+// et impaires lisent leurs 6 voisins a 60 degres a des offsets
+// DIFFERENTS -- c'est cette bascule qui simule l'hexagone sur une
+// grille carree. Regle mono-plan : seul le plan 0 evolue ; les autres
+// plans traversent inchanges (decor, compteurs...).
+static void cam_step_hex(CAMState *cam) {
+    if (!g_lut_hex_ready) return; // pas de regle chargee : rien a faire
+
+    uint32_t w = cam->width;
+    uint32_t h = cam->height;
+
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t y_up   = (y - 1 + h) % h;
+        uint32_t y_down = (y + 1) % h;
+        int row_odd = y & 1;
+
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t x_right = (x + 1) % w;
+            uint32_t x_left  = (x - 1 + w) % w;
+
+            uint8_t center = cam->plane0_a[y * w + x] ? 1 : 0;
+            uint8_t e = cam->plane0_a[y * w + x_right] ? 1 : 0;
+            uint8_t we = cam->plane0_a[y * w + x_left]  ? 1 : 0;
+
+            uint8_t ne, nw, se, sw;
+            if (row_odd) {
+                // ligne impaire (encodage even-r) : NE/SE decales a l'est
+                ne = cam->plane0_a[y_up   * w + x_right] ? 1 : 0;
+                nw = cam->plane0_a[y_up   * w + x]       ? 1 : 0;
+                se = cam->plane0_a[y_down * w + x_right] ? 1 : 0;
+                sw = cam->plane0_a[y_down * w + x]       ? 1 : 0;
+            } else {
+                // ligne paire : NW/SW decales a l'ouest
+                ne = cam->plane0_a[y_up   * w + x]       ? 1 : 0;
+                nw = cam->plane0_a[y_up   * w + x_left]  ? 1 : 0;
+                se = cam->plane0_a[y_down * w + x]       ? 1 : 0;
+                sw = cam->plane0_a[y_down * w + x_left]  ? 1 : 0;
+            }
+
+            uint32_t entry = center
+                           | ((uint32_t)e  << 1)
+                           | ((uint32_t)ne << 2)
+                           | ((uint32_t)nw << 3)
+                           | ((uint32_t)we << 4)
+                           | ((uint32_t)sw << 5)
+                           | ((uint32_t)se << 6)
+                           | ((uint32_t)rng_bit() << 7);
+
+            cam->plane0_b[y * w + x] = g_lut_hex[entry] ? 1 : 0;
+        }
+    }
+
+    // les autres plans traversent inchanges (regle mono-plan)
+    memcpy(cam->plane1_b, cam->plane1_a, (size_t)w * h);
+    memcpy(cam->plane2_b, cam->plane2_a, (size_t)w * h);
+    memcpy(cam->plane3_b, cam->plane3_a, (size_t)w * h);
+
+    cam_swap_buffers(cam);
+}
+
 void cam_step(CAMState *cam) {
     if (g_step_mode == CAM_MODE_MARGOLUS) {
         cam_step_margolus(cam);
+    } else if (g_step_mode == CAM_MODE_HEX) {
+        cam_step_hex(cam);
     } else {
         cam_step_lut(cam);
     }

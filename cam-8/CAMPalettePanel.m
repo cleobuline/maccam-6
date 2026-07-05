@@ -11,6 +11,7 @@
 @property (strong) NSButton    *circleBtn;
 @property (strong) NSButton    *squareBtn;
 @property (strong) NSButton    *eraserBtn;
+@property (strong) NSButton    *sprayBtn;
 @property (strong) NSSlider    *sizeSlider;
 @property (strong) NSTextField *sizeLabel;
 @property (strong) NSTextField *densityField;
@@ -36,7 +37,7 @@
 }
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(900, 400, 190, 526);
+    NSRect frame = NSMakeRect(900, 400, 190, 646);
     self = [super initWithContentRect:frame
                             styleMask:NSWindowStyleMaskTitled |
                                       NSWindowStyleMaskClosable |
@@ -62,7 +63,7 @@
 
 - (void)_buildUI {
     NSView *v = self.contentView;
-    CGFloat y = 486;
+    CGFloat y = 606;
     CGFloat x = 10;
     CGFloat w = 170;
 
@@ -101,6 +102,13 @@
     y -= 28;
     _squareBtn = [self _toolButton:@"⬛ Carré"   tag:2 x:x      y:y w:80 view:v];
     _eraserBtn = [self _toolButton:@"◻ Gomme"   tag:3 x:x+85   y:y w:80 view:v];
+    y -= 28;
+    // Spray : densite aleatoire dans le rayon du pinceau. En mode CAM,
+    // seme des cellules eparses (utile pour des textures organiques,
+    // germes de dendrite...). En mode FHP, injecte du gaz UNIQUEMENT
+    // sur le canal HEX-E -- un "vent" dirige, pour former un vrai jet
+    // au lieu du grouillement isotrope de Lancer.
+    _sprayBtn  = [self _toolButton:@"💨 Spray"   tag:4 x:x      y:y w:170 view:v];
 
     // pinceau sélectionné par défaut
     _pencilBtn.state = NSControlStateValueOn;
@@ -165,6 +173,34 @@
     }
     y -= 38;
 
+    // --- MODE FHP (chapitre 16) ---
+    // Une seule case : elle bascule TOUTE la grille sur le gaz FHP
+    // (fhp.h/.c) au lieu de CAM-A/CAM-B/Margolus. Desactivee par
+    // defaut : aucun changement de comportement si on n'y touche pas.
+    NSButton *fhpCheck = [NSButton checkboxWithTitle:@"Mode FHP (gaz, ch.16)"
+                                              target:self action:@selector(_fhpModeChanged:)];
+    fhpCheck.frame = NSMakeRect(x, y, w, 20);
+    fhpCheck.state = NSControlStateValueOff;
+    fhpCheck.toolTip = @"Bascule la grille sur le vrai gaz hexagonal a 6 canaux (fhp.c). En mode FHP, le pinceau pose des OBSTACLES au lieu de peindre les plans.";
+    [v addSubview:fhpCheck];
+    y -= 22;
+
+    NSButton *windCheck = [NSButton checkboxWithTitle:@"Vent continu (bord gauche)"
+                                               target:self action:@selector(_windChanged:)];
+    windCheck.frame = NSMakeRect(x, y, w, 20);
+    windCheck.state = NSControlStateValueOff;
+    windCheck.toolTip = @"Reinjecte du gaz HEX-E le long du bord gauche a chaque pas pendant Play -- indispensable pour un vrai jet/sillage, un Spray ponctuel se disperse et s'equilibre.";
+    [v addSubview:windCheck];
+    y -= 22;
+
+    NSButton *openCheck = [NSButton checkboxWithTitle:@"Bords ouverts (sortie a droite)"
+                                               target:self action:@selector(_openChannelChanged:)];
+    openCheck.frame = NSMakeRect(x, y, w, 20);
+    openCheck.state = NSControlStateValueOff;
+    openCheck.toolTip = @"Le gaz qui atteint le bord droit sort du domaine au lieu de reapparaitre a gauche par le tore -- evite la recirculation en bandes stagnantes avec un vent continu.";
+    [v addSubview:openCheck];
+    y -= 26;
+
     // (Le popup VOISINAGE a été retiré : le voisinage est désormais
     // entièrement déterminé par la règle compilée — MAKE-TABLE pour
     // Moore, MAKE-TABLE-MARGOLUS pour Margolus. Une seule source de
@@ -221,7 +257,7 @@
 - (void)_selectTool:(NSButton *)sender {
     _currentTool = (CAMTool)sender.tag;
 
-    for (NSButton *btn in @[_pencilBtn, _circleBtn, _squareBtn, _eraserBtn]) {
+    for (NSButton *btn in @[_pencilBtn, _circleBtn, _squareBtn, _eraserBtn, _sprayBtn]) {
         btn.state = (btn.tag == sender.tag)
                     ? NSControlStateValueOn
                     : NSControlStateValueOff;
@@ -272,10 +308,29 @@
     }
 }
 
+- (void)_fhpModeChanged:(NSButton *)sender {
+    _fhpMode = (sender.state == NSControlStateValueOn);
+}
+
+- (void)_windChanged:(NSButton *)sender {
+    _continuousWind = (sender.state == NSControlStateValueOn);
+}
+
+- (void)_openChannelChanged:(NSButton *)sender {
+    _openChannel = (sender.state == NSControlStateValueOn);
+}
+
 - (void)_visibilityChanged:(NSButton *)sender {
     int bit = 1 << sender.tag;
     if (sender.state == NSControlStateValueOn) _visibleMask |= bit;
     else                                        _visibleMask &= ~bit;
+}
+
+// Lecture TOUJOURS live du champ "% ALÉATOIRE" : Spray (et tout autre
+// appelant) doit voir la valeur actuellement tapee, meme si Lancer n'a
+// jamais ete cliqué avec cette valeur precise.
+- (int)density {
+    return _densityField ? _densityField.intValue : _density;
 }
 
 - (void)_randomize {

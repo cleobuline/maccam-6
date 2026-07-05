@@ -10,7 +10,8 @@ typedef NS_ENUM(NSInteger, CAMTool) {
     CAMToolPencil = 0,
     CAMToolCircle,
     CAMToolSquare,
-    CAMToolEraser
+    CAMToolEraser,
+    CAMToolSpray // densite aleatoire dans le rayon ; en mode FHP, vent dirige HEX-E
 };
 
 @interface CAMPalettePanel : NSPanel
@@ -24,6 +25,27 @@ typedef NS_ENUM(NSInteger, CAMTool) {
 // calcule toujours tout) — l'équivalent des color maps du CAM-6.
 @property (nonatomic, assign) int       visibleMask;
 @property (nonatomic, assign) BOOL      isRunning;
+
+// Mode FHP (chapitre 16) : quand actif, la grille bascule entierement
+// sur le sous-systeme gaz FHP (fhp.h/.c) au lieu de CAM-A/CAM-B/Margolus.
+// Rien dans le chemin normal n'est modifie par ce mode : c'est un
+// aiguillage propre dans Document.m et CAMView.m, jamais actif par
+// defaut (FALSE au demarrage).
+@property (nonatomic, assign) BOOL      fhpMode;
+
+// Vent continu (chapitre 16) : reinjecte du gaz sur HEX-E le long du
+// bord gauche a CHAQUE pas, tant que Play tourne. Sans ca, Spray n'est
+// qu'un coup de pinceau ponctuel qui se disperse et s'equilibre --
+// jamais un vrai flux etabli capable de former un sillage stable
+// derriere un obstacle. Sans effet si fhpMode est OFF.
+@property (nonatomic, assign) BOOL      continuousWind;
+
+// Bords ouverts (chapitre 16) : le gaz qui atteint le bord DROIT sort
+// du domaine au lieu de reapparaitre a gauche par le tore. Sans ca,
+// avec Vent continu, le gaz appauvri par un obstacle finit par
+// recirculer et former des artefacts de bandes stagnantes au lieu
+// d'un vrai sillage. Sans effet si fhpMode est OFF.
+@property (nonatomic, assign) BOOL      openChannel;
 
 // callbacks vers Document
 @property (nonatomic, copy) void (^onReverse)(void);

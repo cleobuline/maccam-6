@@ -23,6 +23,32 @@ int32_t forth_pop(ForthVM *vm) {
     return 0;
 }
 
+// N/HEX (chapitre 16, FHP) : grille pseudo-hexagonale par decalage en
+// quinconce. Le plan 0 est lu comme d'habitude (rangees paires et
+// impaires alignees dans la memoire), mais les 6 voisins hexagonaux se
+// lisent a des offsets DIFFERENTS selon la parite de la ligne (row_odd) :
+// sur une ligne paire, les voisins diagonaux NE/NW/SE/SW pointent vers
+// la ligne du dessus/dessous a la MEME colonne et la colonne+1 (a l'est) ;
+// sur une ligne impaire, vers la colonne et la colonne-1 (a l'ouest).
+// C'est l'astuce classique du "brickwork" : une ligne sur deux est
+// visuellement decalee d'une demi-cellule.
+// L'appelant (cam_core.c) calcule les 6 bits ligne par ligne selon cette
+// regle puis assemble l'entree ; ce decodeur n'assigne que les champs
+// de la VM a partir d'une entree deja assemblee (bit0=CENTER,
+// bits 1-6 = E,NE,NW,W,SW,SE, bit7=RAND). row_odd n'est ici qu'a titre
+// documentaire pour les appelants qui voudraient l'utiliser eux-memes.
+void forth_decode_entry_hex(ForthVM *vm, uint32_t entry, int row_odd) {
+    (void)row_odd;
+    vm->center = entry & 1;
+    vm->hex_e  = (entry >> 1) & 1;
+    vm->hex_ne = (entry >> 2) & 1;
+    vm->hex_nw = (entry >> 3) & 1;
+    vm->hex_w  = (entry >> 4) & 1;
+    vm->hex_sw = (entry >> 5) & 1;
+    vm->hex_se = (entry >> 6) & 1;
+    vm->rnd    = (entry >> 7) & 1;
+}
+
 // N/VONN, tableau 7.2 : les diagonales du plan 0 sont remplacées par les
 // voisins von Neumann du plan 1.
 //   bit0=CENTER bit1=CENTER' bit2=EAST' bit3=WEST' bit4=SOUTH' bit5=NORTH'
@@ -275,6 +301,14 @@ static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int star
         else if (str_eq(token, "EAST'"))    forth_push(vm, vm->east_p);
         else if (str_eq(token, "WEST'"))    forth_push(vm, vm->west_p);
 
+        // --- voisins hexagonaux (N/HEX, chapitre 16) ---
+        else if (str_eq(token, "HEX-E"))    forth_push(vm, vm->hex_e);
+        else if (str_eq(token, "HEX-NE"))   forth_push(vm, vm->hex_ne);
+        else if (str_eq(token, "HEX-NW"))   forth_push(vm, vm->hex_nw);
+        else if (str_eq(token, "HEX-W"))    forth_push(vm, vm->hex_w);
+        else if (str_eq(token, "HEX-SW"))   forth_push(vm, vm->hex_sw);
+        else if (str_eq(token, "HEX-SE"))   forth_push(vm, vm->hex_se);
+
         // --- voisins de Margolus (bloc 2x2, §12.5) ---
         else if (str_eq(token, "CW"))       forth_push(vm, vm->cw);
         else if (str_eq(token, "CCW"))      forth_push(vm, vm->ccw);
@@ -407,6 +441,14 @@ static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int star
             int32_t b = forth_pop(vm), a = forth_pop(vm);
             forth_push(vm, (a != b) ? 1 : 0);
         }
+        else if (str_eq(token, ">")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, (a > b) ? 1 : 0);
+        }
+        else if (str_eq(token, "<")) {
+            int32_t b = forth_pop(vm), a = forth_pop(vm);
+            forth_push(vm, (a < b) ? 1 : 0);
+        }
 
         // --- expédition vers les plans (§5.4) : >PLNn dépile la valeur
         // et la destine au plan n. >PLNO (lettre O) = graphie OCR de >PLN0.
@@ -507,6 +549,28 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
     uint8_t lo_bit = half ? 0x4 : 0x1; // bits correspondants de out_mask
     uint8_t hi_bit = half ? 0x8 : 0x2;
     int vonn = (vm->neighborhood == FORTH_NEIGHBORHOOD_VONN);
+    int hex  = (vm->neighborhood == FORTH_NEIGHBORHOOD_HEX);
+
+    // N/HEX (chapitre 16) : table dediee, plus petite (256 entrees,
+    // pas de sondes ni de plan 1 -- le gaz FHP est mono-plan). On
+    // n'ecrit que le bit0 (plan 0) ; le reste du buffer lut n'est pas
+    // touche par cette branche.
+    if (hex) {
+        for (uint32_t entry = 0; entry < FORTH_HEX_LUT_SIZE; entry++) {
+            forth_decode_entry_hex(vm, entry, 0);
+            vm->sp = 0;
+            vm->out_mask = 0;
+
+            char word_tokens[FORTH_MAX_TOKENS][32];
+            int word_count = tokenize(body, word_tokens);
+            exec_tokens(vm, word_tokens, 0, word_count);
+
+            uint8_t p0 = (vm->out_mask & 0x1) ? vm->out_val[0]
+                                              : ((forth_pop(vm) != 0) ? 1 : 0);
+            lut[entry] = p0;
+        }
+        return;
+    }
 
     for (uint32_t entry = 0; entry < FORTH_LUT_SIZE; entry++) {
         if (vonn) forth_decode_entry_vonn(vm, entry & 0x3FF);
@@ -753,6 +817,11 @@ int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
         if (str_eq(tokens[i], "N/MARG") || str_eq(tokens[i], "N/MARGOLUS") ||
             str_eq(tokens[i], "N/MARG-PH") || str_eq(tokens[i], "N/MARG-HV")) {
             vm->neighborhood = FORTH_NEIGHBORHOOD_MARGOLUS;
+            i++;
+            continue;
+        }
+        if (str_eq(tokens[i], "N/HEX")) {
+            vm->neighborhood = FORTH_NEIGHBORHOOD_HEX;
             i++;
             continue;
         }

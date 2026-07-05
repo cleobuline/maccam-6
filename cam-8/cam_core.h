@@ -23,7 +23,8 @@ typedef enum {
 //  - CAM_MODE_MARGOLUS : partitionnement en blocs 2x2 (le vrai voisinage du CAM-8 original)
 typedef enum {
     CAM_MODE_LUT      = 0,
-    CAM_MODE_MARGOLUS = 1
+    CAM_MODE_MARGOLUS = 1,
+    CAM_MODE_HEX      = 2  // chapitre 16 : grille pseudo-hexagonale (FHP)
 } CAMStepMode;
 
 typedef struct {

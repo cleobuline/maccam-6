@@ -63,6 +63,11 @@
 }
 
 - (void)renderFrame {
+    if (self.palette && self.palette.fhpMode && _fhpState) {
+        [self _renderFHPFrame];
+        return;
+    }
+
     if (!_camState || !_bitmapContext) return;
 
     uint32_t w = _camState->width;
@@ -77,6 +82,40 @@
                         (vis & 4) ? _camState->plane2_a[y * w + x] : 0,
                         (vis & 8) ? _camState->plane3_a[y * w + x] : 0,
                         &r, &g, &b);
+
+            size_t idx = (y * w + x) * 4;
+            _pixels[idx + 0] = r;
+            _pixels[idx + 1] = g;
+            _pixels[idx + 2] = b;
+            _pixels[idx + 3] = 255;
+        }
+    }
+
+    [self setNeedsDisplay:YES];
+}
+
+// Rendu du gaz FHP : densite locale (0-6) en niveaux de gris, obstacles
+// en orange. Ignore volontairement palette.visibleMask -- le gaz FHP
+// n'a pas de "plans" au sens CAM, juste une densite et un decor.
+- (void)_renderFHPFrame {
+    if (!_fhpState || !_bitmapContext) return;
+
+    uint32_t w = _fhpState->width;
+    uint32_t h = _fhpState->height;
+
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t r, g, b;
+            size_t i = (size_t)y * w + x;
+
+            if (_fhpState->obstacle[i]) {
+                r = 255; g = 140; b = 0; // orange, meme famille que le CAM-B
+            } else {
+                uint8_t density = fhp_local_density(_fhpState, x, y); // 0-6
+                uint8_t level = (uint8_t)(density * 255 / 6);
+                r = g = b = level; // niveaux de gris : plus dense = plus clair
+                if (density > 0) { g = level; b = (uint8_t)(level * 0.6 + 60); } // legere teinte bleutee
+            }
 
             size_t idx = (y * w + x) * 4;
             _pixels[idx + 0] = r;
@@ -111,6 +150,63 @@
 }
 
 - (void)_paintAtGridX:(int)gx y:(int)gy {
+    if (!_palette) return;
+
+    // Mode FHP : le pinceau pose/efface des OBSTACLES, pas des cellules
+    // de plan. Chemin entierement separe du dessin CAM habituel.
+    if (_palette.fhpMode && _fhpState) {
+        int size = _palette.brushSize;
+        CAMTool tool = _palette.currentTool;
+        uint32_t w = _fhpState->width, h = _fhpState->height;
+
+        if (tool == CAMToolSpray) {
+            // Vent dirige : injecte du gaz UNIQUEMENT sur le canal HEX-E,
+            // avec une densite probabiliste (le champ "% ALEATOIRE" de la
+            // palette) dans le rayon du pinceau. C'est ce qui manquait
+            // pour former un vrai jet oriente au lieu du grouillement
+            // isotrope de Lancer.
+            int r = size;
+            int density = _palette.density;
+            for (int dy = -r; dy <= r; dy++)
+                for (int dx = -r; dx <= r; dx++)
+                    if (dx*dx + dy*dy <= r*r) {
+                        int nx = gx + dx, ny = gy + dy;
+                        if (nx >= 0 && nx < (int)w && ny >= 0 && ny < (int)h) {
+                            if ((int)(arc4random_uniform(100)) < density) {
+                                _fhpState->dir_a[FHP_DIR_E][ny * w + nx] = 1;
+                            }
+                        }
+                    }
+            [self renderFrame];
+            return;
+        }
+
+        int present = (tool == CAMToolEraser) ? 0 : 1;
+
+        if (tool == CAMToolCircle) {
+            int r = size;
+            for (int dy = -r; dy <= r; dy++)
+                for (int dx = -r; dx <= r; dx++)
+                    if (dx*dx + dy*dy <= r*r) {
+                        int nx = gx + dx, ny = gy + dy;
+                        if (nx >= 0 && nx < (int)w && ny >= 0 && ny < (int)h)
+                            fhp_set_obstacle(_fhpState, nx, ny, present);
+                    }
+        } else {
+            // pinceau, carre, ou gomme : meme empreinte carree
+            int r = size / 2;
+            for (int dy = -r; dy <= r; dy++)
+                for (int dx = -r; dx <= r; dx++) {
+                    int nx = gx + dx, ny = gy + dy;
+                    if (nx >= 0 && nx < (int)w && ny >= 0 && ny < (int)h)
+                        fhp_set_obstacle(_fhpState, nx, ny, present);
+                }
+        }
+
+        [self renderFrame];
+        return;
+    }
+
     if (!_camState || !_palette) return;
 
     int      size  = _palette.brushSize;
@@ -158,6 +254,26 @@
                 int ny = gy + dy;
                 if (nx >= 0 && nx < (int)w && ny >= 0 && ny < (int)h) {
                     grid[ny * w + nx] = val;
+                }
+            }
+        }
+    } else if (tool == CAMToolSpray) {
+        // densite aleatoire dans le rayon (le champ "% ALEATOIRE" de la
+        // palette pilote la probabilite) -- utile pour des germes de
+        // dendrite epars, des textures organiques, sans le cote trop
+        // geometrique du pinceau/cercle/carre plein.
+        int r = size;
+        int density = _palette.density;
+        for (int dy = -r; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (dx*dx + dy*dy <= r*r) {
+                    int nx = gx + dx;
+                    int ny = gy + dy;
+                    if (nx >= 0 && nx < (int)w && ny >= 0 && ny < (int)h) {
+                        if ((int)(arc4random_uniform(100)) < density) {
+                            grid[ny * w + nx] = 1;
+                        }
+                    }
                 }
             }
         }

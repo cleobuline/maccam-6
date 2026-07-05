@@ -44,8 +44,15 @@ typedef struct {
 typedef enum {
     FORTH_NEIGHBORHOOD_MOORE    = 0,
     FORTH_NEIGHBORHOOD_VONN     = 1,
-    FORTH_NEIGHBORHOOD_MARGOLUS = 2
+    FORTH_NEIGHBORHOOD_MARGOLUS = 2,
+    FORTH_NEIGHBORHOOD_HEX      = 3
 } ForthNeighborhood;
+
+// N/HEX (chapitre 16, FHP) : grille pseudo-hexagonale par decalage en
+// quinconce, une ligne sur deux. 6 directions a 60 degres au lieu des
+// 4/8 habituelles. Encodage horaire a partir de l'est : E, NE, NW, W,
+// SW, SE. bit0=CENTER bit1..6=E,NE,NW,W,SW,SE bit7=RAND
+#define FORTH_HEX_LUT_SIZE 256
 
 typedef struct {
     int32_t   stack[FORTH_STACK_SIZE];
@@ -54,6 +61,9 @@ typedef struct {
     uint8_t center, center_prime;
     uint8_t north, south, east, west;
     uint8_t neast, nwest, seast, swest;
+
+    // Voisins hexagonaux (N/HEX, chapitre 16) : 6 directions a 60 degres.
+    uint8_t hex_e, hex_ne, hex_nw, hex_w, hex_sw, hex_se;
 
     // N/VONN (tableau 7.2) : voisins von Neumann du plan 1.
     uint8_t north_p, south_p, east_p, west_p;
@@ -150,6 +160,7 @@ void    forth_push(ForthVM *vm, int32_t val);
 int32_t forth_pop(ForthVM *vm);
 void    forth_decode_entry(ForthVM *vm, uint32_t entry);
 void    forth_decode_entry_vonn(ForthVM *vm, uint32_t entry);
+void    forth_decode_entry_hex(ForthVM *vm, uint32_t entry, int row_odd);
 void    forth_decode_margolus_corner(ForthVM *vm, uint8_t nw, uint8_t ne,
                                       uint8_t sw, uint8_t se, ForthCorner corner);
 // Décodage complet : bloc plan 0, bloc plan 1 (voisins primés) et PHASE

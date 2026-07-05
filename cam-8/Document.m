@@ -3,6 +3,7 @@
 #include "cam_core.h"
 #import "CAMPalettePanel.h"
 #import "CAMEditorWindowController.h"
+#include "fph.h"
 #import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h>
@@ -24,6 +25,7 @@ static const char *RULE_TIME_TUNNEL =
     CFTimeInterval _frameInterval; // 1.0/fps — réglable via la palette
     NSString *_pendingRuleSource; // règle lue depuis un fichier avant que la fenêtre existe
     NSString *_currentRuleSource; // dernière règle compilée avec succès, pour survivre à un changement de taille
+    FHPState *_fhp; // sous-systeme gaz FHP (chapitre 16), independant de _cam
 }
 @property (nonatomic, assign) BOOL isRunning;@end
 
@@ -42,6 +44,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         _isRunning = NO; // en pause au départ — l'utilisateur décide quand lancer
         _frameInterval = 1.0 / 30.0; // 30 fps par défaut, comme avant
         cam_set_rule(RULE_TIME_TUNNEL);
+        _fhp = fhp_create(_cam->width, _cam->height); // toujours cree, mais inerte tant que fhpMode est OFF
     }
     return self;
 }
@@ -52,6 +55,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         CVDisplayLinkRelease(_displayLink);
     }
     if (_cam) cam_destroy(_cam);
+    if (_fhp) fhp_destroy(_fhp);
 }
 
 - (NSString *)windowNibName { return @"Document"; }
@@ -82,6 +86,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     _camView = [[CAMView alloc] initWithFrame:leftContainer.bounds];
     _camView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _camView.camState = _cam;
+    _camView.fhpState = _fhp;
     [leftContainer addSubview:_camView];
 
     // Panneau droit : Éditeur
@@ -230,10 +235,14 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     _cam = fresh;
     cam_destroy(old);
 
+    if (_fhp) fhp_destroy(_fhp);
+    _fhp = fhp_create(_cam->width, _cam->height);
+
     if (_currentRuleSource) cam_set_rule([_currentRuleSource UTF8String]);
     else cam_set_rule(RULE_TIME_TUNNEL);
 
     _camView.camState = _cam;
+    _camView.fhpState = _fhp;
     [CAMPalettePanel sharedPalette].camState = _cam;
     [CAMEditorWindowController sharedEditor].camState = _cam;
     [_camView renderFrame];
@@ -245,8 +254,28 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     if (CACurrentMediaTime() - _lastFrameTime < _frameInterval) return;
     _lastFrameTime = CACurrentMediaTime();
     dispatch_async(dispatch_get_main_queue(), ^{
+        CAMPalettePanel *pal = [CAMPalettePanel sharedPalette];
+        BOOL fhpOn = pal.fhpMode;
         if (self.isRunning) {
-            if (self->_timeReversed && cam_can_reverse()) {
+            if (fhpOn && self->_fhp) {
+                self->_fhp->open_right_edge = pal.openChannel;
+                if (pal.continuousWind) {
+                    // Reinjection du gaz HEX-E le long du bord gauche, A
+                    // CHAQUE pas -- exactement la methode qui a produit
+                    // un vrai sillage dans les tests hors-app (fhp_wake).
+                    // Un Spray manuel ponctuel ne peut pas reproduire ca :
+                    // sans reinjection continue, tout gaz injecte se
+                    // disperse et s'equilibre au lieu de former un flux.
+                    int density = pal.density;
+                    uint32_t H = self->_fhp->height;
+                    for (uint32_t row = 0; row < H; row++) {
+                        if ((int)arc4random_uniform(100) < density) {
+                            self->_fhp->dir_a[FHP_DIR_E][row * self->_fhp->width + 0] = 1;
+                        }
+                    }
+                }
+                fhp_step(self->_fhp);
+            } else if (self->_timeReversed && cam_can_reverse()) {
                 cam_step_back(self->_cam);
             } else {
                 cam_step(self->_cam);
@@ -495,10 +524,22 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     memset(_cam->plane1_a, 0, total); memset(_cam->plane1_b, 0, total);
     memset(_cam->plane2_a, 0, total); memset(_cam->plane2_b, 0, total);
     memset(_cam->plane3_a, 0, total); memset(_cam->plane3_b, 0, total);
+    // Efface aussi le gaz FHP (les 6 canaux ET les obstacles peints) —
+    // sans condition sur fhpMode : "tout" veut dire tout, y compris ce
+    // qu'on ne regarde pas actuellement.
+    if (_fhp) fhp_clear(_fhp);
     [_camView renderFrame];
 }
 
 - (void)_randomizePlanes:(int)density {
+    // Mode FHP : seme le gaz sur les 6 canaux directionnels (pas de
+    // notion de "plan selectionne" ici — le gaz n'a que ses 6 directions).
+    if ([CAMPalettePanel sharedPalette].fhpMode && _fhp) {
+        for (int d = 0; d < 6; d++) fhp_seed_random(_fhp, (FHPDirection)d, density);
+        [_camView renderFrame];
+        return;
+    }
+
     // Sème dans le plan SÉLECTIONNÉ de la palette, sans toucher aux
     // autres : le décor (germes, parois, chronos CAM-B) survit au Lancer.
     // "Effacer tout" reste le moyen de vraiment tout vider.
