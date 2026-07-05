@@ -205,6 +205,18 @@ static const char *dict_lookup(ForthVM *vm, const char *name) {
     return NULL;
 }
 
+// Comme dict_lookup, mais donne acces au ForthWord entier -- en
+// particulier a ses tokens deja mis en cache (voir ForthWord dans
+// cam_forth.h), pour eviter de retokeniser le corps a chaque appel.
+static ForthWord *dict_lookup_word(ForthVM *vm, const char *name) {
+    for (int i = 0; i < vm->dict_size; i++) {
+        if (str_eq(vm->dict[i].name, name)) {
+            return &vm->dict[i];
+        }
+    }
+    return NULL;
+}
+
 // déclarations forward
 static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int start, int end);
 static int32_t forth_eval_inner(ForthVM *vm, const char *rule);
@@ -268,13 +280,10 @@ static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int star
         }
 
         // --- mot utilisateur (dictionnaire) ---
-  
         {
-            const char *body = dict_lookup(vm, token);
-            if (body) {
-                char word_tokens[FORTH_MAX_TOKENS][32];
-                int word_count = tokenize(body, word_tokens);
-                exec_tokens(vm, word_tokens, 0, word_count);
+            ForthWord *w = dict_lookup_word(vm, token);
+            if (w) {
+                exec_tokens(vm, w->tokens, 0, w->token_count);
                 i++;
                 continue;
             }
@@ -551,6 +560,14 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
     int vonn = (vm->neighborhood == FORTH_NEIGHBORHOOD_VONN);
     int hex  = (vm->neighborhood == FORTH_NEIGHBORHOOD_HEX);
 
+    // Tokenise UNE SEULE FOIS ici : "body" ne change jamais a travers
+    // les 256/1024/8192 iterations qui suivent. Avant cette correction,
+    // tokenize() etait rappele a CHAQUE entree -- un gaspillage pur,
+    // mesure a ~20ms par compilation sur une regle a mots imbriques ;
+    // le tokeniseur re-decoupait le meme texte des milliers de fois.
+    char word_tokens[FORTH_MAX_TOKENS][32];
+    int word_count = tokenize(body, word_tokens);
+
     // N/HEX (chapitre 16) : table dediee, plus petite (256 entrees,
     // pas de sondes ni de plan 1 -- le gaz FHP est mono-plan). On
     // n'ecrit que le bit0 (plan 0) ; le reste du buffer lut n'est pas
@@ -561,8 +578,6 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
             vm->sp = 0;
             vm->out_mask = 0;
 
-            char word_tokens[FORTH_MAX_TOKENS][32];
-            int word_count = tokenize(body, word_tokens);
             exec_tokens(vm, word_tokens, 0, word_count);
 
             uint8_t p0 = (vm->out_mask & 0x1) ? vm->out_val[0]
@@ -581,8 +596,6 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
         vm->sp = 0;
         vm->out_mask = 0;
 
-        char word_tokens[FORTH_MAX_TOKENS][32];
-        int word_count = tokenize(body, word_tokens);
         exec_tokens(vm, word_tokens, 0, word_count);
 
         uint8_t plo = (vm->out_mask & lo_bit) ? vm->out_val[lo]
@@ -707,6 +720,7 @@ int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
             for (int d = 0; d < vm->dict_size; d++) {
                 if (str_eq(vm->dict[d].name, word_name)) {
                     strncpy(vm->dict[d].body, body, FORTH_BODY_MAXLEN - 1);
+                    vm->dict[d].token_count = tokenize(body, vm->dict[d].tokens);
                     found = 1;
                     break;
                 }
@@ -714,6 +728,8 @@ int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
             if (!found && vm->dict_size < FORTH_DICT_SIZE) {
                 strncpy(vm->dict[vm->dict_size].name, word_name, FORTH_WORD_MAXLEN - 1);
                 strncpy(vm->dict[vm->dict_size].body, body, FORTH_BODY_MAXLEN - 1);
+                vm->dict[vm->dict_size].token_count =
+                    tokenize(body, vm->dict[vm->dict_size].tokens);
                 vm->dict_size++;
             }
             continue;

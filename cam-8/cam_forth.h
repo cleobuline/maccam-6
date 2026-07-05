@@ -37,6 +37,13 @@ typedef enum {
 typedef struct {
     char name[FORTH_WORD_MAXLEN];
     char body[FORTH_BODY_MAXLEN];
+    // Cache des tokens de "body", calcule UNE FOIS a la definition (:)
+    // plutot qu'a chaque appel du mot. Sans ce cache, un mot invoque
+    // a l'interieur d'une regle Margolus/CAM-B est re-tokenise a
+    // chaque coin de chaque entree de table -- des milliers de fois
+    // pour le meme texte immuable.
+    char tokens[FORTH_MAX_TOKENS][32];
+    int  token_count;
 } ForthWord;
 
 // Voisinage déclaré dans la source Forth (N/MOORE, N/VONN, N/MARG) —

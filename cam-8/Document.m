@@ -26,6 +26,7 @@ static const char *RULE_TIME_TUNNEL =
     NSString *_pendingRuleSource; // règle lue depuis un fichier avant que la fenêtre existe
     NSString *_currentRuleSource; // dernière règle compilée avec succès, pour survivre à un changement de taille
     FHPState *_fhp; // sous-systeme gaz FHP (chapitre 16), independant de _cam
+    NSTextField *_videoScaleField; // "auto" ou une valeur numerique (0.5, 2, 3...)
 }
 @property (nonatomic, assign) BOOL isRunning;@end
 
@@ -121,6 +122,17 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     [(NSButtonCell *)exportBtn.cell setLineBreakMode:NSLineBreakByClipping];
     exportBtn.toolTip = @"Exporter en vidéo…";
     [editorContainer addSubview:exportBtn];
+
+    // Champ d'échelle vidéo, réglable : "auto" (défaut, vise ~768px de
+    // côté comme avant) ou une valeur numérique explicite (0.5, 1, 2,
+    // 3...) — multiplie la taille NATIVE de la grille, pas la taille
+    // d'écran. 0.5 = video a moitie resolution, 2 = double, etc.
+    _videoScaleField = [NSTextField textFieldWithString:@"auto"];
+    _videoScaleField.frame = NSMakeRect(124, 14, 60, 22);
+    _videoScaleField.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+    _videoScaleField.alignment = NSTextAlignmentCenter;
+    _videoScaleField.toolTip = @"Échelle vidéo : \"auto\" (~768px), ou une valeur comme 0.5, 1, 2, 3 — multiplie la taille native de la grille.";
+    [editorContainer addSubview:_videoScaleField];
 
     // Texte — scrollableTextView configure correctement l'élasticité
     // (textContainer qui suit la largeur, verticallyResizable, scrollers, etc.)
@@ -358,14 +370,29 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     uint32_t w = exportCam->width;
     uint32_t h = exportCam->height;
 
-    // Upscale en pixels NETS (réplication de blocs, équivalent du
-    // kCGInterpolationNone de l'écran) : on vise ~768 px de côté — tient
-    // dans un écran 1280x800 en plein écran, multiple exact des grilles
-    // (128->x6, 256->x3) et de 16 pour H.264. 512 et 1024 partent natifs.
-    uint32_t scale = 768 / w;
-    if (scale < 1) scale = 1;
-    uint32_t vw = w * scale;
-    uint32_t vh = h * scale;
+    // Échelle : "auto" vise ~768 px de côté comme avant (tient dans un
+    // écran 1280x800 en plein écran) ; sinon la valeur tapée dans le
+    // champ (0.5, 1, 2, 3...) multiplie directement la taille NATIVE
+    // de la grille — permet aussi bien un export allégé (0.5x) qu'un
+    // agrandissement supérieur à 3x.
+    NSString *scaleText = [_videoScaleField.stringValue stringByTrimmingCharactersInSet:
+                            [NSCharacterSet whitespaceCharacterSet]];
+    double scale;
+    if (scaleText.length == 0 || [scaleText caseInsensitiveCompare:@"auto"] == NSOrderedSame) {
+        double autoScale = 768.0 / (double)w;
+        scale = (autoScale < 1.0) ? 1.0 : autoScale;
+    } else {
+        scale = [scaleText doubleValue];
+        if (scale <= 0.0) scale = 1.0; // saisie invalide (texte, zéro, négatif) : repli sûr
+        if (scale > 8.0) scale = 8.0;   // garde-fou : évite une vidéo démesurée par erreur de frappe
+    }
+
+    uint32_t vw = (uint32_t)round(w * scale);
+    uint32_t vh = (uint32_t)round(h * scale);
+    if (vw < 16) vw = 16; // garde-fou : jamais une vidéo degenerée (ex. 0.01x)
+    if (vh < 16) vh = 16;
+    if (vw % 2 != 0) vw += 1; // H.264 exige des dimensions paires
+    if (vh % 2 != 0) vh += 1;
 
     NSDictionary *videoSettings = @{
         AVVideoCodecKey:   AVVideoCodecTypeH264,
@@ -425,42 +452,69 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     }];
 }
 
-- (void)_fillPixelBuffer:(CVPixelBufferRef)pixelBuffer fromCAM:(CAMState *)cam scale:(uint32_t)scale {
+// scale a virgule (0.5, 1, 2, 3...) : echantillonnage au plus proche
+// voisin dans les DEUX directions plutot que la replication de blocs
+// entiers — generalise proprement a l'agrandissement ET a la reduction
+// (la replication de blocs ne savait faire QUE l'agrandissement entier).
+- (void)_fillPixelBuffer:(CVPixelBufferRef)pixelBuffer fromCAM:(CAMState *)cam scale:(double)scale {
     CVPixelBufferLockBaseAddress(pixelBuffer, 0);
 
     uint8_t *dest = (uint8_t *)CVPixelBufferGetBaseAddress(pixelBuffer);
     size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
     uint32_t w = cam->width;
     uint32_t h = cam->height;
+    uint32_t vw = (uint32_t)(bytesPerRow / 4);
+    uint32_t vh = (uint32_t)CVPixelBufferGetHeight(pixelBuffer);
+    int vis = [CAMPalettePanel sharedPalette].visibleMask;
 
-    for (uint32_t y = 0; y < h; y++) {
-        // remplit la première ligne du bloc de cette rangée de cellules...
-        uint8_t *row = dest + (size_t)y * scale * bytesPerRow;
-        for (uint32_t x = 0; x < w; x++) {
-            uint8_t r, g, b;
-            int vis = [CAMPalettePanel sharedPalette].visibleMask;
-            cam_palette((vis & 1) ? cam->plane0_a[y * w + x] : 0,
-                        (vis & 2) ? cam->plane1_a[y * w + x] : 0,
-                        (vis & 4) ? cam->plane2_a[y * w + x] : 0,
-                        (vis & 8) ? cam->plane3_a[y * w + x] : 0,
-                        &r, &g, &b);
+    // Meme technique que CAMView.renderFrame : table de 16 couleurs
+    // precalculee une fois, plutot qu'un appel a cam_palette() (jusqu'a
+    // 5 branches) par ligne source. Le masque de visibilite est deja
+    // applique en amont, sur le nibble d'index -- la table elle-meme
+    // sert pour toutes les combinaisons de visibilite.
+    uint8_t table[16][3];
+    for (int n = 0; n < 16; n++)
+        cam_palette(n & 1, (n >> 1) & 1, (n >> 2) & 1, (n >> 3) & 1,
+                    &table[n][0], &table[n][1], &table[n][2]);
 
-            for (uint32_t sx = 0; sx < scale; sx++) {
-                size_t idx = ((size_t)x * scale + sx) * 4;
-                row[idx + 0] = b; // BGRA
-                row[idx + 1] = g;
-                row[idx + 2] = r;
-                row[idx + 3] = 255;
+    // Cache par ligne SOURCE (évite de retraiter la même ligne quand
+    // scale > 1 : plusieurs pixels de sortie retombent sur la même
+    // cellule source).
+    uint8_t *lastRowRGB = malloc((size_t)w * 3);
+    uint32_t lastSourceY = UINT32_MAX;
+
+    for (uint32_t oy = 0; oy < vh; oy++) {
+        uint32_t sy = (uint32_t)(oy / scale);
+        if (sy >= h) sy = h - 1;
+
+        if (sy != lastSourceY) {
+            for (uint32_t x = 0; x < w; x++) {
+                size_t si = (size_t)sy * w + x;
+                uint8_t nibble = ((vis & 1) ? cam->plane0_a[si] : 0)
+                                | (((vis & 2) ? cam->plane1_a[si] : 0) << 1)
+                                | (((vis & 4) ? cam->plane2_a[si] : 0) << 2)
+                                | (((vis & 8) ? cam->plane3_a[si] : 0) << 3);
+                uint8_t *rgb = table[nibble];
+                lastRowRGB[x * 3 + 0] = rgb[0];
+                lastRowRGB[x * 3 + 1] = rgb[1];
+                lastRowRGB[x * 3 + 2] = rgb[2];
             }
+            lastSourceY = sy;
         }
-        // ...puis duplique cette ligne sur les scale-1 suivantes (memcpy,
-        // bien plus rapide que de recalculer la palette pour chaque pixel)
-        for (uint32_t sy = 1; sy < scale; sy++) {
-            memcpy(dest + ((size_t)y * scale + sy) * bytesPerRow, row,
-                   (size_t)w * scale * 4);
+
+        uint8_t *row = dest + (size_t)oy * bytesPerRow;
+        for (uint32_t ox = 0; ox < vw; ox++) {
+            uint32_t sx = (uint32_t)(ox / scale);
+            if (sx >= w) sx = w - 1;
+            size_t idx = (size_t)ox * 4;
+            row[idx + 0] = lastRowRGB[sx * 3 + 2]; // B
+            row[idx + 1] = lastRowRGB[sx * 3 + 1]; // G
+            row[idx + 2] = lastRowRGB[sx * 3 + 0]; // R
+            row[idx + 3] = 255;
         }
     }
 
+    free(lastRowRGB);
     CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
 }
 

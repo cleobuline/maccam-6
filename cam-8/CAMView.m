@@ -74,19 +74,33 @@
     uint32_t h = _camState->height;
     int vis = self.palette ? self.palette.visibleMask : 0xF;
 
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            uint8_t r, g, b;
-            cam_palette((vis & 1) ? _camState->plane0_a[y * w + x] : 0,
-                        (vis & 2) ? _camState->plane1_a[y * w + x] : 0,
-                        (vis & 4) ? _camState->plane2_a[y * w + x] : 0,
-                        (vis & 8) ? _camState->plane3_a[y * w + x] : 0,
-                        &r, &g, &b);
+    // Table de 16 couleurs precalculee : cam_palette() n'a que 2^4=16
+    // entrees possibles (4 plans booleens), mais etait rappelee a
+    // chaque pixel avec sa chaine de branches -- une consultation de
+    // table (3 lectures) remplace un appel de fonction a 5 branches,
+    // pour chaque pixel de la grille. Le masque de visibilite s'applique
+    // en amont, sur les BITS qui forment l'index, pas sur la table
+    // elle-meme : une seule table sert pour toutes les combinaisons
+    // de visibilite.
+    uint8_t table[16][3];
+    for (int n = 0; n < 16; n++)
+        cam_palette(n & 1, (n >> 1) & 1, (n >> 2) & 1, (n >> 3) & 1,
+                    &table[n][0], &table[n][1], &table[n][2]);
 
-            size_t idx = (y * w + x) * 4;
-            _pixels[idx + 0] = r;
-            _pixels[idx + 1] = g;
-            _pixels[idx + 2] = b;
+    for (uint32_t y = 0; y < h; y++) {
+        size_t rowbase = (size_t)y * w;
+        for (uint32_t x = 0; x < w; x++) {
+            size_t i = rowbase + x;
+            uint8_t nibble = ((vis & 1) ? _camState->plane0_a[i] : 0)
+                            | (((vis & 2) ? _camState->plane1_a[i] : 0) << 1)
+                            | (((vis & 4) ? _camState->plane2_a[i] : 0) << 2)
+                            | (((vis & 8) ? _camState->plane3_a[i] : 0) << 3);
+            uint8_t *rgb = table[nibble];
+
+            size_t idx = i * 4;
+            _pixels[idx + 0] = rgb[0];
+            _pixels[idx + 1] = rgb[1];
+            _pixels[idx + 2] = rgb[2];
             _pixels[idx + 3] = 255;
         }
     }
@@ -103,6 +117,17 @@
     uint32_t w = _fhpState->width;
     uint32_t h = _fhpState->height;
 
+    // Densite locale = 0..6 (somme de 6 plans booleens) : 7 valeurs
+    // possibles seulement, precalculees une fois plutot que refaire la
+    // multiplication/conversion pour chaque pixel.
+    uint8_t densityTable[7][3];
+    for (int d = 0; d <= 6; d++) {
+        uint8_t level = (uint8_t)(d * 255 / 6);
+        uint8_t r = level, g = level, b = level;
+        if (d > 0) { b = (uint8_t)(level * 0.6 + 60); }
+        densityTable[d][0] = r; densityTable[d][1] = g; densityTable[d][2] = b;
+    }
+
     for (uint32_t y = 0; y < h; y++) {
         for (uint32_t x = 0; x < w; x++) {
             uint8_t r, g, b;
@@ -112,9 +137,8 @@
                 r = 255; g = 140; b = 0; // orange, meme famille que le CAM-B
             } else {
                 uint8_t density = fhp_local_density(_fhpState, x, y); // 0-6
-                uint8_t level = (uint8_t)(density * 255 / 6);
-                r = g = b = level; // niveaux de gris : plus dense = plus clair
-                if (density > 0) { g = level; b = (uint8_t)(level * 0.6 + 60); } // legere teinte bleutee
+                uint8_t *rgb = densityTable[density];
+                r = rgb[0]; g = rgb[1]; b = rgb[2];
             }
 
             size_t idx = (y * w + x) * 4;
