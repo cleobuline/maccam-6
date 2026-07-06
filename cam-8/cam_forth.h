@@ -12,7 +12,11 @@
 // Table Margolus complète (tableau 7.2 + chapitres 8 et 11) :
 // index = nibble plan 0 (bits 0-3) | nibble plan 1 (bits 4-7)
 //       | PHASE (bit 8) | RAND (bit 9) | PHASE' (bit 10)
-#define FORTH_MARG_TABLE_SIZE 2048
+// 32768 = 2^15 : p0(4) + p1(4) + phase(1) + rand(1) + phase'(1) +
+// sonde-croisee-CENTER' (4, une par coin — voir &/CENTERS en Margolus).
+// Avant l'extension du 6/7, cette table faisait 2048 (2^11) : aucune
+// place pour les sondes croisees, qui n'existaient qu'en mode LUT.
+#define FORTH_MARG_TABLE_SIZE 32768
 // Longueur maximale d'un run-cycle (§11.5)
 #define FORTH_CYCLE_MAX 16
 #define FORTH_MAX_TOKENS    256
@@ -33,6 +37,7 @@ typedef enum {
 #define FORTH_BUILT_LUT      0x1
 #define FORTH_BUILT_MARGOLUS 0x2
 #define FORTH_BUILT_LUT_B    0x4
+#define FORTH_BUILT_MARGOLUS_B 0x8
 
 typedef struct {
     char name[FORTH_WORD_MAXLEN];
@@ -156,6 +161,15 @@ typedef struct {
     uint8_t margolus_p1[FORTH_MARG_TABLE_SIZE];
     int     margolus_p1_used;
 
+    // CAM-B a sa PROPRE table Margolus, independante de celle de CAM-A.
+    // Dans la vraie machine des annees 80, les deux modules etaient
+    // symetriques : n'importe lequel pouvait executer n'importe quel
+    // voisinage, Margolus inclus. Cette paire de tables comble le
+    // manque de notre portage (qui ne l'autorisait qu'a CAM-A).
+    uint8_t margolus_p0_b[FORTH_MARG_TABLE_SIZE];
+    uint8_t margolus_p1_b[FORTH_MARG_TABLE_SIZE];
+    int     margolus_p1_used_b;
+
     // Run-cycle déclaré par CYCLE ... END-CYCLE dans la source.
     // cycle_len == 0 : pas de déclaration, le moteur garde ALT-GRID-PH.
     ForthCycleStep cycle[FORTH_CYCLE_MAX];
@@ -172,9 +186,15 @@ void    forth_decode_margolus_corner(ForthVM *vm, uint8_t nw, uint8_t ne,
                                       uint8_t sw, uint8_t se, ForthCorner corner);
 // Décodage complet : bloc plan 0, bloc plan 1 (voisins primés) et PHASE
 // (les parités spatiales HORZ/VERT en sont déduites, cf. §11.2/§12.8).
+// probe_p1_nibble : sonde croisee &CENTER' (chapitre 9/16), un bit par
+// coin -- valeur de l'AUTRE demi-machine (plan3 pour CAM-A, plan1 pour
+// CAM-B) a la position ABSOLUE de ce coin. 0 si aucune table de l'autre
+// moitie n'est chargee (comportement inchange pour les regles qui ne
+// l'utilisent pas).
 void    forth_decode_margolus_full(ForthVM *vm, uint8_t p0_nibble,
                                     uint8_t p1_nibble, uint8_t phase,
-                                    uint8_t phase_prime, ForthCorner corner);
+                                    uint8_t phase_prime, uint8_t probe_p1_nibble,
+                                    ForthCorner corner);
 int32_t forth_eval(ForthVM *vm, const char *rule);
 
 // tables: réceptacle des tables construites (peut être NULL : la source

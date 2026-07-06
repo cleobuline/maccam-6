@@ -1,5 +1,5 @@
 //
-//  fhp.c 
+//  fhp.c
 //  cam-8 — chapitre 16
 //
 //  Implementation isolee. Duplique volontairement une petite fonction
@@ -84,6 +84,7 @@ FHPState *fhp_create(uint32_t width, uint32_t height) {
     fhp->width = width;
     fhp->height = height;
     fhp->rng_state = 0x5EED1234u;
+    fhp->p_rest_convert = 0; // FHP-I par defaut : cette extension n'existe pas tant qu'on ne l'active pas
 
     size_t n = (size_t)width * height;
     int ok = 1;
@@ -93,7 +94,9 @@ FHPState *fhp_create(uint32_t width, uint32_t height) {
         if (!fhp->dir_a[d] || !fhp->dir_b[d]) ok = 0;
     }
     fhp->obstacle = calloc(n, 1);
-    if (!fhp->obstacle) ok = 0;
+    fhp->rest_a = calloc(n, 1);
+    fhp->rest_b = calloc(n, 1);
+    if (!fhp->obstacle || !fhp->rest_a || !fhp->rest_b) ok = 0;
 
     if (!ok) { fhp_destroy(fhp); return NULL; }
     return fhp;
@@ -106,6 +109,8 @@ void fhp_destroy(FHPState *fhp) {
         free(fhp->dir_b[d]);
     }
     free(fhp->obstacle);
+    free(fhp->rest_a);
+    free(fhp->rest_b);
     free(fhp);
 }
 
@@ -116,6 +121,8 @@ void fhp_clear(FHPState *fhp) {
         memset(fhp->dir_b[d], 0, n);
     }
     memset(fhp->obstacle, 0, n);
+    memset(fhp->rest_a, 0, n);
+    memset(fhp->rest_b, 0, n);
 }
 
 void fhp_seed_random(FHPState *fhp, FHPDirection dir, int density_percent) {
@@ -136,7 +143,14 @@ int fhp_total_population(const FHPState *fhp) {
     for (int d = 0; d < 6; d++)
         for (size_t i = 0; i < n; i++)
             total += fhp->dir_a[d][i];
+    for (size_t i = 0; i < n; i++)
+        total += fhp->rest_a[i]; // 0, 1 ou 2 -- compte comme autant de particules
     return total;
+}
+
+uint8_t fhp_local_rest(const FHPState *fhp, uint32_t x, uint32_t y) {
+    if (x >= fhp->width || y >= fhp->height) return 0;
+    return fhp->rest_a[(size_t)y * fhp->width + x];
 }
 
 uint8_t fhp_local_density(const FHPState *fhp, uint32_t x, uint32_t y) {
@@ -161,8 +175,15 @@ uint8_t fhp_local_density(const FHPState *fhp, uint32_t x, uint32_t y) {
 // rubans stationnaires au lieu de former un vrai sillage turbulent.
 // Sinon (0, 1, ou configurations non-symetriques), rien ne change : la
 // configuration traverse telle quelle vers la phase de transport.
+// Choix uniforme parmi 3 (les 3 axes E/W, NE/SW, NW/SE) pour l'emission
+// d'une paire au repos -- biais du modulo negligeable sur un xorshift32.
+static inline int fhp_rng_axis3(FHPState *fhp) {
+    return (int)(fhp_rng_next(fhp) % 3);
+}
+
 static void fhp_collide(FHPState *fhp, uint8_t *coll[6]) {
     size_t n = (size_t)fhp->width * fhp->height;
+    int p_rest = fhp->p_rest_convert;
 
     for (size_t i = 0; i < n; i++) {
         if (fhp->obstacle[i]) {
@@ -173,6 +194,9 @@ static void fhp_collide(FHPState *fhp, uint8_t *coll[6]) {
             coll[FHP_DIR_SW][i] = fhp->dir_a[FHP_DIR_NE][i];
             coll[FHP_DIR_NW][i] = fhp->dir_a[FHP_DIR_SE][i];
             coll[FHP_DIR_SE][i] = fhp->dir_a[FHP_DIR_NW][i];
+            // une particule au repos n'a pas de vitesse a inverser :
+            // elle reste simplement collee contre le mur.
+            fhp->rest_b[i] = fhp->rest_a[i];
             continue;
         }
 
@@ -182,6 +206,7 @@ static void fhp_collide(FHPState *fhp, uint8_t *coll[6]) {
         uint8_t w  = fhp->dir_a[FHP_DIR_W][i];
         uint8_t sw = fhp->dir_a[FHP_DIR_SW][i];
         uint8_t se = fhp->dir_a[FHP_DIR_SE][i];
+        uint8_t rest = fhp->rest_a[i];
 
         int axis_ew  = e && w;
         int axis_nesw = ne && sw;
@@ -190,19 +215,45 @@ static void fhp_collide(FHPState *fhp, uint8_t *coll[6]) {
 
         uint8_t out_e = e, out_ne = ne, out_nw = nw,
                 out_w = w, out_sw = sw, out_se = se;
+        uint8_t out_rest = rest;
 
+        // FHP-II (particules au repos) : une paire FRONTALE a quantite
+        // de mouvement nette NULLE (E+W, NE+SW ou NW+SE s'annulent) --
+        // c'est la SEULE configuration a 2 corps qui puisse legitimement
+        // se convertir en 2 particules au repos (vitesse nulle) sans
+        // violer ni le nombre de particules (2 entrent -> 2 sortent) ni
+        // la quantite de mouvement (0 -> 0). p_rest_convert regle la
+        // probabilite de cette conversion : c'est le bouton de
+        // viscosite qui manquait a FHP-I. A 0 (defaut), aucune branche
+        // ci-dessous ne peut jamais se declencher (fhp_rng_below refuse
+        // tout avec une probabilite nulle) -- comportement FHP-I intact.
         if (total == 2 && axis_ew) {
-            out_e = out_w = 0;
-            if (fhp_rng_bit(fhp)) { out_ne = out_sw = 1; }
-            else                  { out_nw = out_se = 1; }
+            if (p_rest > 0 && rest == 0 && (int)(fhp_rng_next(fhp) % 100) < p_rest) {
+                out_e = out_w = 0;
+                out_rest = 2;
+            } else {
+                out_e = out_w = 0;
+                if (fhp_rng_bit(fhp)) { out_ne = out_sw = 1; }
+                else                  { out_nw = out_se = 1; }
+            }
         } else if (total == 2 && axis_nesw) {
-            out_ne = out_sw = 0;
-            if (fhp_rng_bit(fhp)) { out_e = out_w = 1; }
-            else                  { out_nw = out_se = 1; }
+            if (p_rest > 0 && rest == 0 && (int)(fhp_rng_next(fhp) % 100) < p_rest) {
+                out_ne = out_sw = 0;
+                out_rest = 2;
+            } else {
+                out_ne = out_sw = 0;
+                if (fhp_rng_bit(fhp)) { out_e = out_w = 1; }
+                else                  { out_nw = out_se = 1; }
+            }
         } else if (total == 2 && axis_nwse) {
-            out_nw = out_se = 0;
-            if (fhp_rng_bit(fhp)) { out_e = out_w = 1; }
-            else                  { out_ne = out_sw = 1; }
+            if (p_rest > 0 && rest == 0 && (int)(fhp_rng_next(fhp) % 100) < p_rest) {
+                out_nw = out_se = 0;
+                out_rest = 2;
+            } else {
+                out_nw = out_se = 0;
+                if (fhp_rng_bit(fhp)) { out_e = out_w = 1; }
+                else                  { out_ne = out_sw = 1; }
+            }
         } else if (total == 3 && e && nw && sw && !ne && !w && !se) {
             // triplet symetrique A (E, NW, SW a 120 degres) : rotation
             // deterministe de 60 degres vers l'AUTRE triplet symetrique.
@@ -218,6 +269,20 @@ static void fhp_collide(FHPState *fhp, uint8_t *coll[6]) {
             // triplet symetrique B : rotation vers le triplet A.
             out_ne = out_w = out_se = 0;
             out_e = out_nw = out_sw = 1;
+        } else if (total == 0 && rest == 2 && p_rest > 0
+                   && (int)(fhp_rng_next(fhp) % 100) < p_rest) {
+            // Reciproque : 2 particules au repos, aucune particule en
+            // mouvement sur les 6 directions -- EMISSION d'une paire
+            // frontale sur un axe choisi au hasard parmi les 3. C'est
+            // cette reciprocite qui rend la conversion physiquement
+            // sensee (un aller sans retour ne serait qu'une fuite de
+            // masse deguisee vers un puits, pas une vraie viscosite).
+            out_rest = 0;
+            switch (fhp_rng_axis3(fhp)) {
+                case 0: out_e = out_w = 1; break;
+                case 1: out_ne = out_sw = 1; break;
+                default: out_nw = out_se = 1; break;
+            }
         }
         // sinon : inchange (0, 1, ou 3+ particules autres que les deux
         // triplets symetriques, paires non frontales — cas transparents)
@@ -228,6 +293,7 @@ static void fhp_collide(FHPState *fhp, uint8_t *coll[6]) {
         coll[FHP_DIR_W][i]  = out_w;
         coll[FHP_DIR_SW][i] = out_sw;
         coll[FHP_DIR_SE][i] = out_se;
+        fhp->rest_b[i] = out_rest;
     }
 }
 
@@ -269,7 +335,7 @@ void fhp_step(FHPState *fhp) {
     uint8_t *coll[6];
     for (int d = 0; d < 6; d++) coll[d] = malloc(n);
 
-    fhp_collide(fhp, coll);
+    fhp_collide(fhp, coll); // ecrit aussi directement dans fhp->rest_b
     fhp_transport(fhp, coll);
 
     for (int d = 0; d < 6; d++) {
@@ -278,4 +344,10 @@ void fhp_step(FHPState *fhp) {
         fhp->dir_a[d] = fhp->dir_b[d];
         fhp->dir_b[d] = tmp;
     }
+
+    // le repos ne "transporte" jamais (vitesse nulle) : rest_b a deja
+    // ete rempli par fhp_collide, il suffit d'echanger les tampons.
+    uint8_t *rtmp = fhp->rest_a;
+    fhp->rest_a = fhp->rest_b;
+    fhp->rest_b = rtmp;
 }

@@ -18,6 +18,7 @@
 @property (strong) NSPopUpButton *planePopup;
 @property (strong) NSPopUpButton *sizePopup;
 @property (strong) NSTextField   *fpsField;
+@property (strong) NSTextField   *viscosityField;
 @property (strong) NSButton    *reverseBtn;
 @property (strong) NSButton    *playPauseBtn;
 @property (strong) NSButton    *randomizeBtn;
@@ -37,7 +38,7 @@
 }
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(900, 400, 190, 646);
+    NSRect frame = NSMakeRect(900, 400, 190, 682);
     self = [super initWithContentRect:frame
                             styleMask:NSWindowStyleMaskTitled |
                                       NSWindowStyleMaskClosable |
@@ -63,7 +64,7 @@
 
 - (void)_buildUI {
     NSView *v = self.contentView;
-    CGFloat y = 606;
+    CGFloat y = 642;
     CGFloat x = 10;
     CGFloat w = 170;
 
@@ -201,6 +202,21 @@
     [v addSubview:openCheck];
     y -= 26;
 
+    // --- VISCOSITE (FHP-II, particules au repos) ---
+    [self _addLabel:@"Viscosité (particules au repos, %)" x:x y:y w:w view:v];
+    y -= 24;
+
+    _viscosityField = [NSTextField textFieldWithString:@"0"];
+    _viscosityField.frame = NSMakeRect(x, y, 50, 22);
+    _viscosityField.toolTip = @"0 = FHP-I classique. Plus haut, plus le gaz \"colle\" en particules au repos lors des collisions frontales -- c'est ce qui donne au sillage derriere un obstacle sa vraie viscosite.";
+    [v addSubview:_viscosityField];
+
+    NSButton *viscosityApply = [NSButton buttonWithTitle:@"Appliquer"
+                                             target:self action:@selector(_viscosityChanged:)];
+    viscosityApply.frame = NSMakeRect(x+58, y-2, 104, 26);
+    [v addSubview:viscosityApply];
+    y -= 38;
+
     // (Le popup VOISINAGE a été retiré : le voisinage est désormais
     // entièrement déterminé par la règle compilée — MAKE-TABLE pour
     // Moore, MAKE-TABLE-MARGOLUS pour Margolus. Une seule source de
@@ -318,6 +334,14 @@
 
 - (void)_openChannelChanged:(NSButton *)sender {
     _openChannel = (sender.state == NSControlStateValueOn);
+}
+
+- (void)_viscosityChanged:(id)sender {
+    int v = _viscosityField.intValue;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    _viscosityField.stringValue = [NSString stringWithFormat:@"%d", v];
+    _fhpViscosity = v;
 }
 
 - (void)_visibilityChanged:(NSButton *)sender {

@@ -47,6 +47,12 @@ typedef NS_ENUM(NSInteger, CAMTool) {
 // d'un vrai sillage. Sans effet si fhpMode est OFF.
 @property (nonatomic, assign) BOOL      openChannel;
 
+// FHP-II (chapitre 16, particules au repos) : probabilite (0-100)
+// qu'une collision frontale a 2 corps soit absorbee en particules au
+// repos plutot que devier -- le bouton de viscosite qui manquait a
+// FHP-I. A 0 (defaut), comportement identique a FHP-I.
+@property (nonatomic, assign) int       fhpViscosity;
+
 // callbacks vers Document
 @property (nonatomic, copy) void (^onReverse)(void);
 @property (nonatomic, copy) void (^onPlayPause)(BOOL running);

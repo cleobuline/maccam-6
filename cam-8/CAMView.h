@@ -16,6 +16,12 @@
 // comporte exactement comme avant, chemin CAM inchange.
 @property (nonatomic, assign) FHPState      *fhpState;
 
+// Appele apres CHAQUE coup de pinceau/Cercle/Carre/Spray sur la grille
+// CAM (pas le mode FHP, jamais exporte pour l'instant) -- permet a
+// Document de resynchroniser le clone d'export si un export tourne en
+// tache de fond, exactement comme apres Compiler/Lancer/Effacer tout.
+@property (nonatomic, copy) void (^onGridPainted)(void);
+
 - (void)renderFrame;
 
 @end

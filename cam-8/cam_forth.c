@@ -75,11 +75,25 @@ void forth_decode_entry_vonn(ForthVM *vm, uint32_t entry) {
 // déduisent du coin et de la phase.
 void forth_decode_margolus_full(ForthVM *vm, uint8_t p0_nibble,
                                  uint8_t p1_nibble, uint8_t phase,
-                                 uint8_t phase_prime, ForthCorner corner) {
+                                 uint8_t phase_prime, uint8_t probe_p1_nibble,
+                                 ForthCorner corner) {
     uint8_t nw0 = (p0_nibble >> 0) & 1, ne0 = (p0_nibble >> 1) & 1;
     uint8_t sw0 = (p0_nibble >> 2) & 1, se0 = (p0_nibble >> 3) & 1;
     uint8_t nw1 = (p1_nibble >> 0) & 1, ne1 = (p1_nibble >> 1) & 1;
     uint8_t sw1 = (p1_nibble >> 2) & 1, se1 = (p1_nibble >> 3) & 1;
+
+    // &CENTER' est UNIFORME PAR BLOC (le bit NW du nibble de sonde, tout
+    // le temps), PAS par coin. Sans ca, chaque coin verrait une valeur
+    // DIFFERENTE de la sonde (position absolue differente sur le plan
+    // croise), et les 4 coins choisiraient CW/CCW independamment plutot
+    // qu'en rotation coordonnee du bloc entier -- ce qui brise la
+    // conservation du nombre de particules (une rotation est une
+    // permutation, garantie conservative ; 4 choix independants ne le
+    // sont pas). Meme principe que RAND, deja partage par tout le bloc.
+    // Decouvert le 6/7 : DENDRITE-NOISE fuyait des particules du plan 0
+    // meme SANS aucun mur peint, exactement a cause de cette variation
+    // par coin.
+    uint8_t probe = (probe_p1_nibble >> 0) & 1;
 
     uint8_t cx, cy;
     switch (corner) {
@@ -105,6 +119,7 @@ void forth_decode_margolus_full(ForthVM *vm, uint8_t p0_nibble,
             cx = 0; cy = 1;
             break;
     }
+    vm->amp_center_prime = probe; // identique pour les 4 coins, voir ci-dessus
 
     vm->phase       = phase & 1;
     vm->phase_prime = phase_prime & 1;
@@ -626,6 +641,17 @@ static void build_margolus_from_body(ForthVM *vm,
     int word_count = tokenize(body, word_tokens);
     uint8_t used_mask = 0;
 
+    // Sensible a la moitie, comme build_lut_from_body : en CAM-B, la
+    // sortie "propre" de cette demi-machine est PLN2/PLN3 (bits 0x4/0x8
+    // de out_mask), pas PLN0/PLN1. Avant ce correctif, cette fonction
+    // ne regardait JAMAIS out_val[2]/[3] -- >PLN2 a l'interieur d'une
+    // regle Margolus CAM-B etait donc silencieusement ignore, la table
+    // retombant a zero partout (voir dendrite/CAM-B, session du 6/7).
+    int half = vm->half;
+    int lo = half ? 2 : 0;
+    uint8_t lo_bit = half ? 0x4 : 0x1;
+    uint8_t hi_bit = half ? 0x8 : 0x2;
+
     *p1_used = 0;
 
     for (uint32_t idx = 0; idx < FORTH_MARG_TABLE_SIZE; idx++) {
@@ -634,22 +660,24 @@ static void build_margolus_from_body(ForthVM *vm,
         uint8_t phase     = (idx >> 8) & 1;
         uint8_t rnd       = (idx >> 9) & 1;
         uint8_t phase_p   = (idx >> 10) & 1;
+        uint8_t probe_p1  = (idx >> 11) & 0xF;
         uint8_t out_p0 = 0;
         uint8_t out_p1 = 0;
 
         for (int c = 0; c < 4; c++) {
-            forth_decode_margolus_full(vm, p0_nibble, p1_nibble, phase, phase_p, corners[c]);
+            forth_decode_margolus_full(vm, p0_nibble, p1_nibble, phase,
+                                        phase_p, probe_p1, corners[c]);
             vm->rnd = rnd; // bit RAND commun au bloc (chapitre 8)
             vm->sp = 0;
             vm->out_mask = 0;
             exec_tokens(vm, word_tokens, 0, word_count);
 
-            uint8_t p0 = (vm->out_mask & 0x1) ? vm->out_val[0]
-                                              : ((forth_pop(vm) != 0) ? 1 : 0);
+            uint8_t p0 = (vm->out_mask & lo_bit) ? vm->out_val[lo]
+                                                 : ((forth_pop(vm) != 0) ? 1 : 0);
             out_p0 |= (p0 << c);
 
-            if (vm->out_mask & 0x2) {
-                out_p1 |= (vm->out_val[1] << c);
+            if (vm->out_mask & hi_bit) {
+                out_p1 |= (vm->out_val[lo + 1] << c);
                 *p1_used = 1;
             }
             used_mask |= vm->out_mask;
@@ -659,7 +687,10 @@ static void build_margolus_from_body(ForthVM *vm,
         p1_table[idx] = out_p1;
     }
 
-    warn_camb_if_needed(used_mask);
+    // L'avertissement ne concerne plus que CAM-A ecrivant a tort sur
+    // PLN2/PLN3 (toujours un no-op la) -- desormais sans objet pour une
+    // regle CAM-B qui ecrit legitimement sur ses propres plans.
+    if (half == 0) warn_camb_if_needed(used_mask);
 }
 
 int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
@@ -865,8 +896,13 @@ int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
 
             if (margolus && tables) {
                 if (vm->half == 1) {
-                    fprintf(stderr, "CAM-FORTH: Margolus non supporté en "
-                                    "CAM-B — table ignorée.\n");
+                    // CAM-B a sa PROPRE table Margolus, symetrique de
+                    // celle de CAM-A -- fidele a la vraie machine des
+                    // annees 80, ou les deux modules etaient identiques.
+                    build_margolus_from_body(vm, tables->margolus_p0_b,
+                                              tables->margolus_p1_b,
+                                              &tables->margolus_p1_used_b, body);
+                    built |= FORTH_BUILT_MARGOLUS_B;
                 } else {
                     build_margolus_from_body(vm, tables->margolus_p0,
                                               tables->margolus_p1,

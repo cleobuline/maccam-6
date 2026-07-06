@@ -68,6 +68,29 @@ typedef struct {
     // Desactive par defaut : le comportement torique d'origine (utile
     // pour les bancs d'essai d'isotropie) n'est pas remis en cause.
     int open_right_edge;
+
+    // FHP-II (particules au repos, viscosite reglable) : un 7e canal,
+    // PAS booleen -- il compte 0, 1 ou 2 particules au repos par
+    // cellule. Deux, pas une seule : c'est le minimum qui permette
+    // d'echanger une PAIRE frontale (quantite de mouvement nette nulle,
+    // E+W ou NE+SW ou NW+SE) contre des particules au repos SANS jamais
+    // violer la conservation du nombre de particules ni de la quantite
+    // de mouvement. Double-tamponne comme les 6 canaux directionnels,
+    // meme si le repos ne "transporte" jamais (vitesse nulle) -- la
+    // phase de transport se contente de le recopier tel quel.
+    uint8_t *rest_a;
+    uint8_t *rest_b;
+
+    // p_rest_convert : probabilite (0-100) qu'une collision frontale a
+    // 2 corps soit ABSORBEE en 2 particules au repos plutot que devier
+    // vers l'axe transverse habituel (et reciproquement, qu'une paire
+    // au repos soit EMISE vers un axe choisi au hasard). C'est LE bouton
+    // de viscosite qui manquait a FHP-I : plus haut, plus le gaz
+    // "colle", plus la traversee d'un obstacle laisse un vrai sillage.
+    // A 0 (defaut), le comportement est identique bit-pour-bit a FHP-I
+    // -- cette extension ne change RIEN a ce qui a deja ete valide ce
+    // soir tant qu'on n'y touche pas explicitement.
+    int p_rest_convert;
 } FHPState;
 
 FHPState *fhp_create(uint32_t width, uint32_t height);
@@ -91,5 +114,6 @@ void fhp_step(FHPState *fhp);
 //  - densite locale a une cellule (0-6)
 int      fhp_total_population(const FHPState *fhp);
 uint8_t  fhp_local_density(const FHPState *fhp, uint32_t x, uint32_t y);
+uint8_t  fhp_local_rest(const FHPState *fhp, uint32_t x, uint32_t y); // 0, 1 ou 2
 
 #endif

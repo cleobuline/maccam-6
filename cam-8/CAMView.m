@@ -304,6 +304,7 @@
     }
 
     [self renderFrame];
+    if (self.onGridPainted) self.onGridPainted();
 }
 
 // La grille doit pouvoir prendre le focus clavier : c'est ce qui permet

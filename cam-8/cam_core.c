@@ -36,6 +36,15 @@ static int           g_margolus_ready = 0;
 static uint8_t      g_margolus_inv[FORTH_MARG_TABLE_SIZE];
 static int           g_margolus_invertible = 0;
 
+// CAM-B a sa PROPRE table Margolus, totalement independante de celle de
+// CAM-A -- meme principe que g_lut_b pour le mode LUT. Pas de table
+// inverse pour l'instant : le premier usage (generateur de bruit,
+// §15.7-16) n'a pas besoin d'etre reversible.
+static uint8_t      g_margolus_table_b[FORTH_MARG_TABLE_SIZE];
+static uint8_t      g_margolus_table_p1_b[FORTH_MARG_TABLE_SIZE];
+static int           g_margolus_p1_used_b = 0;
+static int           g_margolus_b_ready = 0;
+
 // Run-cycle courant (§11.5). Défaut : ALT-GRID-PH, le cycle historique —
 // origine et PHASE alternent ensemble, PHASE' reste à 0.
 static ForthCycleStep g_cycle[FORTH_CYCLE_MAX] = {
@@ -86,36 +95,67 @@ void cam_apply_lut(uint8_t *lut) {
 
 
 // Calcule la table inverse de g_margolus_table si possible.
-// Conditions (chapitre 14) : pas d'expédition >PLN1, table indépendante
-// du nibble du plan 1, et bijection sur les 16 blocs à chaque phase.
+// Condition VRAIMENT nécessaire (chapitre 14) : pour CHAQUE valeur du
+// nibble du plan 1 (mur/décor, jamais réécrit si non expédié via
+// >PLN1) et CHAQUE couple de phase utilisé, la carte plan0-entrée ->
+// plan0-sortie doit être une bijection sur les 16 blocs -- ET la sortie
+// doit être indépendante de RAND (on ne peut pas inverser un tirage de
+// pile ou face). Le plan 1 lui-même n'a PAS besoin d'être identique
+// selon les cas : une règle peut très bien se comporter différemment
+// selon qu'un bloc touche un mur ou non (ex. GAZ-MURS, §15.2), tant que
+// CHAQUE comportement pris isolément reste une bijection. L'ancienne
+// version de cette fonction exigeait, par erreur, que la sortie soit
+// la MÊME quel que soit le plan 1 -- une condition suffisante mais pas
+// nécessaire, qui rejetait à tort toute règle avec parois.
 static void margolus_compute_inverse(void) {
     g_margolus_invertible = 0;
-    if (g_margolus_p1_used) return;
+    if (g_margolus_p1_used) return; // les murs doivent rester éternels
 
-    // indépendance vis-à-vis du plan 1 (bits 4-7) et de RAND (bit 9)
+    // indépendance vis-à-vis de RAND (bit 9) ET de la sonde croisée
+    // &CENTER' (bits 11-14) -- une regle qui lit CAM-B (ex. DENDRITE
+    // pilotee par le generateur de bruit, p.167-168) ne peut pas etre
+    // inversee sans aussi connaitre l'HISTOIRE de CAM-B : on la traite
+    // honnetement comme une source de hasard externe, au meme titre
+    // que RAND. Le plan 1 (bits 4-7) reste la SEULE dependance admise
+    // (bijection par tranche, cf. GAZ-MURS).
     for (uint32_t idx = 0; idx < FORTH_MARG_TABLE_SIZE; idx++) {
-        uint32_t base = (idx & 0xF) | (idx & 0x100) | (idx & 0x400);
+        uint32_t base = idx & ~(uint32_t)(0x200 | 0x7800); // RAND + sonde à 0
         if (g_margolus_table[idx] != g_margolus_table[base]) return;
     }
 
-    // bijection et inversion, par couple (PHASE, PHASE')
+    // bijection et inversion, par couple (PHASE, PHASE') ET par valeur
+    // du nibble du plan 1 : g_margolus_inv est indexé par les MÊMES
+    // bits que g_margolus_table (p0 | p1<<4 | phase<<8 | phase'<<10),
+    // donc chaque tranche de plan 1 reçoit sa PROPRE permutation inverse
+    // -- pas une permutation unique diffusée à toutes les tranches.
     int bijective[4] = {0, 0, 0, 0};
     for (uint32_t pp = 0; pp < 4; pp++) {
         uint32_t hi = ((pp & 1) << 8) | (((pp >> 1) & 1) << 10);
-        uint8_t seen[16] = {0};
-        int ok = 1;
-        for (uint32_t in = 0; in < 16; in++) {
-            uint8_t out = g_margolus_table[in | hi] & 0xF;
-            if (seen[out]) { ok = 0; break; }
-            seen[out] = 1;
+        int pp_ok = 1;
+
+        for (uint32_t p1 = 0; p1 < 16 && pp_ok; p1++) {
+            uint32_t p1_bits = p1 << 4;
+            uint8_t seen[16] = {0};
+            for (uint32_t in = 0; in < 16; in++) {
+                uint8_t out = g_margolus_table[in | p1_bits | hi] & 0xF;
+                if (seen[out]) { pp_ok = 0; break; }
+                seen[out] = 1;
+            }
         }
-        bijective[pp] = ok;
-        if (!ok) continue;
-        for (uint32_t in = 0; in < 16; in++) {
-            uint8_t out = g_margolus_table[in | hi] & 0xF;
-            for (uint32_t p1 = 0; p1 < 16; p1++)
+        bijective[pp] = pp_ok;
+        if (!pp_ok) continue;
+
+        for (uint32_t p1 = 0; p1 < 16; p1++) {
+            uint32_t p1_bits = p1 << 4;
+            for (uint32_t in = 0; in < 16; in++) {
+                uint8_t out = g_margolus_table[in | p1_bits | hi] & 0xF;
+                // diffuse sur les 2 valeurs de RAND ET les 16 valeurs de
+                // la sonde croisee : l'independance verifiee plus haut
+                // garantit que n'importe laquelle donne le meme resultat.
                 for (uint32_t r = 0; r < 2; r++)
-                    g_margolus_inv[out | (p1 << 4) | hi | (r << 9)] = (uint8_t)in;
+                    for (uint32_t pr = 0; pr < 16; pr++)
+                        g_margolus_inv[out | p1_bits | hi | (r << 9) | (pr << 11)] = (uint8_t)in;
+            }
         }
     }
 
@@ -164,14 +204,23 @@ void cam_apply_forth_tables(const ForthTables *tables, int built) {
         }
     }
     // La source décrit toute la machine : CAM-B n'est active que si cette
-    // compilation a construit sa table.
-    if (built & (FORTH_BUILT_LUT | FORTH_BUILT_MARGOLUS | FORTH_BUILT_LUT_B)) {
-        if (built & FORTH_BUILT_LUT_B) {
+    // compilation a construit sa table. Les trois etats (rien, LUT,
+    // Margolus) sont mutuellement exclusifs pour CAM-B, comme pour CAM-A.
+    if (built & (FORTH_BUILT_LUT | FORTH_BUILT_MARGOLUS | FORTH_BUILT_LUT_B | FORTH_BUILT_MARGOLUS_B)) {
+        if (built & FORTH_BUILT_MARGOLUS_B) {
+            memcpy(g_margolus_table_b,    tables->margolus_p0_b, FORTH_MARG_TABLE_SIZE);
+            memcpy(g_margolus_table_p1_b, tables->margolus_p1_b, FORTH_MARG_TABLE_SIZE);
+            g_margolus_p1_used_b = tables->margolus_p1_used_b;
+            g_margolus_b_ready = 1;
+            g_lut_b_ready = 0;
+        } else if (built & FORTH_BUILT_LUT_B) {
             memcpy(g_lut_b, tables->lut_b, FORTH_LUT_SIZE);
             g_lut_b_neighborhood = tables->lut_b_neighborhood;
             g_lut_b_ready = 1;
+            g_margolus_b_ready = 0;
         } else {
             g_lut_b_ready = 0;
+            g_margolus_b_ready = 0;
         }
         g_probe_a = tables->probe_source_a;
         g_probe_b = tables->probe_source_b;
@@ -470,9 +519,73 @@ static void cam_step_margolus(CAMState *cam) {
     uint32_t w = cam->width;
     uint32_t h = cam->height;
 
-    // Plans 2-3 (CAM-B) : hors périmètre du mode Margolus, ils traversent.
-    memcpy(cam->plane2_b, cam->plane2_a, (size_t)w * h);
-    memcpy(cam->plane3_b, cam->plane3_a, (size_t)w * h);
+    // le pas courant du run-cycle pilote la partition et les phases --
+    // CALCULE ICI, avant les deux boucles de blocs (CAM-A et CAM-B
+    // partagent la MEME horloge physique dans la vraie machine).
+    ForthCycleStep step = g_cycle[cam->margolus_phase % g_cycle_len];
+    int offset = step.org ? 1 : 0;
+
+    // Plans 2-3 (CAM-B) : si une table Margolus dediee a ete construite
+    // pour cette moitie, elle tourne EXACTEMENT comme CAM-A -- meme
+    // partition de blocs, meme run-cycle (les deux modules partagent la
+    // meme horloge physique dans la vraie machine). Sinon, comportement
+    // historique : passage inchange.
+    if (g_margolus_b_ready) {
+        for (uint32_t by = 0; by < h / 2; by++) {
+            uint32_t y0 = (2 * by + offset) % h;
+            uint32_t y1 = (2 * by + offset + 1) % h;
+            for (uint32_t bx = 0; bx < w / 2; bx++) {
+                uint32_t x0 = (2 * bx + offset) % w;
+                uint32_t x1 = (2 * bx + offset + 1) % w;
+
+                uint8_t nw = cam->plane2_a[y0 * w + x0] ? 1 : 0;
+                uint8_t ne = cam->plane2_a[y0 * w + x1] ? 1 : 0;
+                uint8_t sw = cam->plane2_a[y1 * w + x0] ? 1 : 0;
+                uint8_t se = cam->plane2_a[y1 * w + x1] ? 1 : 0;
+
+                uint8_t nw1 = cam->plane3_a[y0 * w + x0] ? 1 : 0;
+                uint8_t ne1 = cam->plane3_a[y0 * w + x1] ? 1 : 0;
+                uint8_t sw1 = cam->plane3_a[y1 * w + x0] ? 1 : 0;
+                uint8_t se1 = cam->plane3_a[y1 * w + x1] ? 1 : 0;
+
+                uint8_t p0_nibble = nw  | (ne  << 1) | (sw  << 2) | (se  << 3);
+                uint8_t p1_nibble = nw1 | (ne1 << 1) | (sw1 << 2) | (se1 << 3);
+
+                // CAM-B ne sonde pas encore CAM-A en retour (aucune regle
+                // du bestiaire n'en a besoin pour l'instant) -- le nibble
+                // de sonde reste a 0, mais doit exister pour que l'index
+                // ait la MEME largeur que la table construite a la
+                // compilation (32768 entrees, meme mise en page que CAM-A).
+                uint32_t idx = p0_nibble
+                             | ((uint32_t)p1_nibble << 4)
+                             | ((uint32_t)step.phase << 8)
+                             | ((uint32_t)rng_bit() << 9)
+                             | ((uint32_t)step.phase_prime << 10);
+                uint8_t out_nibble = g_margolus_table_b[idx];
+
+                cam->plane2_b[y0 * w + x0] = (out_nibble >> 0) & 1;
+                cam->plane2_b[y0 * w + x1] = (out_nibble >> 1) & 1;
+                cam->plane2_b[y1 * w + x0] = (out_nibble >> 2) & 1;
+                cam->plane2_b[y1 * w + x1] = (out_nibble >> 3) & 1;
+
+                if (g_margolus_p1_used_b) {
+                    uint8_t p1_out = g_margolus_table_p1_b[idx];
+                    cam->plane3_b[y0 * w + x0] = (p1_out >> 0) & 1;
+                    cam->plane3_b[y0 * w + x1] = (p1_out >> 1) & 1;
+                    cam->plane3_b[y1 * w + x0] = (p1_out >> 2) & 1;
+                    cam->plane3_b[y1 * w + x1] = (p1_out >> 3) & 1;
+                } else {
+                    cam->plane3_b[y0 * w + x0] = cam->plane3_a[y0 * w + x0];
+                    cam->plane3_b[y0 * w + x1] = cam->plane3_a[y0 * w + x1];
+                    cam->plane3_b[y1 * w + x0] = cam->plane3_a[y1 * w + x0];
+                    cam->plane3_b[y1 * w + x1] = cam->plane3_a[y1 * w + x1];
+                }
+            }
+        }
+    } else {
+        memcpy(cam->plane2_b, cam->plane2_a, (size_t)w * h);
+        memcpy(cam->plane3_b, cam->plane3_a, (size_t)w * h);
+    }
 
     // Plan 1 : si la règle expédie >PLN1, il sera écrit bloc par bloc dans
     // la boucle ci-dessous (table p1 indexée par le bloc du plan 0). Sinon,
@@ -482,8 +595,6 @@ static void cam_step_margolus(CAMState *cam) {
     }
 
     // le pas courant du run-cycle pilote la partition et les phases
-    ForthCycleStep step = g_cycle[cam->margolus_phase % g_cycle_len];
-    int offset = step.org ? 1 : 0;
 
     for (uint32_t by = 0; by < h / 2; by++) {
         uint32_t y0 = (2 * by + offset) % h;
@@ -506,12 +617,25 @@ static void cam_step_margolus(CAMState *cam) {
             uint8_t p0_nibble = nw  | (ne  << 1) | (sw  << 2) | (se  << 3);
             uint8_t p1_nibble = nw1 | (ne1 << 1) | (sw1 << 2) | (se1 << 3);
 
-            // index complet : plan 0 | plan 1 | PHASE | RAND | PHASE'
+            // Sonde croisee &CENTER' (chapitre 9/16) : lit le plan 3
+            // (CAM-B) aux 4 positions ABSOLUES de ce bloc. Ne s'active
+            // reellement que si une regle Margolus l'utilise vraiment
+            // (ex. DENDRITE piloté par le generateur de bruit de CAM-B,
+            // p.167-168) ; sinon ces bits restent a 0 sans consequence
+            // puisqu'aucune regle ne les lit.
+            uint8_t nwp = cam->plane3_a[y0 * w + x0] ? 1 : 0;
+            uint8_t nep = cam->plane3_a[y0 * w + x1] ? 1 : 0;
+            uint8_t swp = cam->plane3_a[y1 * w + x0] ? 1 : 0;
+            uint8_t sep = cam->plane3_a[y1 * w + x1] ? 1 : 0;
+            uint8_t probe_p1_nibble = nwp | (nep << 1) | (swp << 2) | (sep << 3);
+
+            // index complet : plan 0 | plan 1 | PHASE | RAND | PHASE' | sonde
             uint32_t idx = p0_nibble
                          | ((uint32_t)p1_nibble << 4)
                          | ((uint32_t)step.phase << 8)
                          | ((uint32_t)rng_bit() << 9)
-                         | ((uint32_t)step.phase_prime << 10);
+                         | ((uint32_t)step.phase_prime << 10)
+                         | ((uint32_t)probe_p1_nibble << 11);
             uint8_t out_nibble = g_margolus_table[idx];
 
             cam->plane0_b[y0 * w + x0] = (out_nibble >> 0) & 1;
@@ -567,7 +691,22 @@ int cam_step_back(CAMState *cam) {
             uint8_t sw = cam->plane0_a[y1 * w + x0] ? 1 : 0;
             uint8_t se = cam->plane0_a[y1 * w + x1] ? 1 : 0;
 
+            // Le plan 1 (murs/décor) doit être lu ICI AUSSI, exactement
+            // comme le pas avant : la permutation inverse à appliquer
+            // dépend de la présence d'un mur dans ce bloc précis (voir
+            // margolus_compute_inverse, une tranche par valeur de p1).
+            // Avant ce correctif, cam_step_back ignorait totalement le
+            // plan 1 -- toute règle dont la sortie depend des murs
+            // (GAZ-MURS) etait donc mal inversee, meme quand le moteur
+            // la déclarait à tort réversible.
+            uint8_t nw1 = cam->plane1_a[y0 * w + x0] ? 1 : 0;
+            uint8_t ne1 = cam->plane1_a[y0 * w + x1] ? 1 : 0;
+            uint8_t sw1 = cam->plane1_a[y1 * w + x0] ? 1 : 0;
+            uint8_t se1 = cam->plane1_a[y1 * w + x1] ? 1 : 0;
+            uint8_t p1_nibble = nw1 | (ne1 << 1) | (sw1 << 2) | (se1 << 3);
+
             uint32_t idx = (uint32_t)(nw | (ne << 1) | (sw << 2) | (se << 3))
+                         | ((uint32_t)p1_nibble << 4)
                          | ((uint32_t)step.phase << 8)
                          | ((uint32_t)step.phase_prime << 10);
             uint8_t out = g_margolus_inv[idx];
