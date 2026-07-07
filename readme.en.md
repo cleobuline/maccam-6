@@ -2,7 +2,7 @@
 
 *A poetic cyberpunk citadel brings a 1987 machine back to life.*
 
-MacCam-6 is a faithful reconstruction, in Cocoa/Objective-C + C, of **CAM-8** — the cellular automata machine designed by Tommaso Toffoli and Norman Margolus, documented in their book *Cellular Automata Machines* (MIT Press, 1987). This is not a decorative rehash: every mechanism (neighborhoods, reversibility, Margolus partitioning, cross-probes between half-machines) was transcribed and then **verified by computation**, often down to the exact pixel or bit, before being considered settled.
+MacCam-6 is a faithful reconstruction, in Cocoa/Objective-C + C, of **CAM-6** — the cellular automata machine designed by Tommaso Toffoli and Norman Margolus, documented in their book *Cellular Automata Machines* (MIT Press, 1987). This is not a decorative rehash: every mechanism (neighborhoods, reversibility, Margolus partitioning, cross-probes between half-machines) was transcribed and then **verified by computation**, often down to the exact pixel or bit, before being considered settled.
 
 The project is the resurrection of an original MacCam written in THINK C on a 68000 Mac in the 1990s by [cleobuline](https://github.com/cleobuline), whose sources were lost. This version comes back to life thirty years later, with a level of rigor a 1990s machine never made easy to verify.
 
