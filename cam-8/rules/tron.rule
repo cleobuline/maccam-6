@@ -1,0 +1,11 @@
+
+N/MARGOLUS
+
+: TRON
+
+CENTER CW CCW OPP + + + 
+
+{ 1 U U U 0 } >PLNO ;
+
+
+MAKE-TABLE TRON
