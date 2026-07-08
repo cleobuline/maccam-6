@@ -53,11 +53,30 @@ typedef NS_ENUM(NSInteger, CAMTool) {
 // FHP-I. A 0 (defaut), comportement identique a FHP-I.
 @property (nonatomic, assign) int       fhpViscosity;
 
+// Spray isotrope : quand actif, Spray injecte du gaz sur les 6
+// directions a la fois (une perturbation localisee et SANS biais,
+// comme jeter un caillou dans l'eau) plutot que seulement HEX-E (le
+// "vent" dirige pour les scenes de soufflerie, comportement par
+// defaut inchange). Decoche par defaut pour ne rien casser de ce qui
+// existe deja.
+@property (nonatomic, assign) BOOL      sprayIsotropic;
+
+// Regroupe les controles specifiques au mode FHP (Vent, Bords ouverts,
+// Viscosite, Spray isotrope) pour les masquer/montrer ensemble selon
+// l'etat de la case "Mode FHP" -- inutile de les montrer en permanence
+// a quelqu'un qui n'utilise que le CAM classique.
+@property (strong) NSArray<NSView *> *fhpControlsViews;
+
 // callbacks vers Document
 @property (nonatomic, copy) void (^onReverse)(void);
 @property (nonatomic, copy) void (^onPlayPause)(BOOL running);
 @property (nonatomic, copy) void (^onRandomize)(int density);
 @property (nonatomic, copy) void (^onClear)(void);
+
+// Efface UN SEUL plan (0-3), sans toucher aux autres -- complement au
+// menu deroulant "Effacer..." qui propose desormais plan par plan en
+// plus de "Effacer tout" (onClear, ci-dessus, inchange).
+@property (nonatomic, copy) void (^onClearPlane)(int plane);
 // mode: 128, 256, 512 ou 1024
 @property (nonatomic, copy) void (^onSizeChange)(int size);
 @property (nonatomic, copy) void (^onFPSChange)(int fps);

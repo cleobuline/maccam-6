@@ -30,6 +30,11 @@ static const char *RULE_TIME_TUNNEL =
     CAMState *_exportCam; // non-NULL PENDANT un export en cours ; permet a
                           // compileRule: de resynchroniser le clone avec
                           // la grille visible (voir _exportVideoDurationSeconds:)
+    FHPState *_exportFhp; // meme principe que _exportCam, mais pour le gaz
+                          // FHP -- non-NULL PENDANT un export lance alors
+                          // que le mode FHP est actif. Avant son ajout,
+                          // l'export ignorait totalement _fhp et clonait
+                          // une grille CAM vide et sans rapport en mode FHP.
     BOOL _pendingExportReverse; // demande d'inversion en attente, posee par
                                 // onReverse (thread principal) et consommee
                                 // par la boucle d'export (thread d'export) --
@@ -187,6 +192,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     palette.onPlayPause = ^(BOOL r) { weakSelf.isRunning = r; };
     palette.onRandomize = ^(int d) { [weakSelf _randomizePlanes:d]; };
     palette.onClear = ^(void) { [weakSelf _clearPlanes]; };
+    palette.onClearPlane = ^(int plane) { [weakSelf _clearPlane:plane]; };
     // (Plus de câblage "voisinage" : le mode Moore/Margolus est déterminé
     // par la règle compilée — MAKE-TABLE ou MAKE-TABLE-MARGOLUS.)
     palette.onSizeChange = ^(int newSize) {
@@ -328,6 +334,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 // grille (Compiler, Lancer, Effacer tout, et le pinceau/Spray/Cercle/
 // Carre via CAMView) -- sans ca, seule la compilation d'une regle se
 // repercutait sur la video, pas les autres facons de modifier la grille.
+// Couvre AUSSI le gaz FHP (_exportFhp), meme principe.
 - (void)_resyncExportCamFromLive {
     if (_exportCam && _exportCam->width == _cam->width && _exportCam->height == _cam->height) {
         uint32_t total = _cam->width * _cam->height;
@@ -336,6 +343,14 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         memcpy(_exportCam->plane2_a, _cam->plane2_a, total);
         memcpy(_exportCam->plane3_a, _cam->plane3_a, total);
         _exportCam->margolus_phase = _cam->margolus_phase;
+    }
+    if (_exportFhp && _fhp && _exportFhp->width == _fhp->width && _exportFhp->height == _fhp->height) {
+        uint32_t total = _fhp->width * _fhp->height;
+        for (int d = 0; d < 6; d++) memcpy(_exportFhp->dir_a[d], _fhp->dir_a[d], total);
+        memcpy(_exportFhp->obstacle, _fhp->obstacle, total);
+        memcpy(_exportFhp->rest_a, _fhp->rest_a, total);
+        _exportFhp->open_right_edge = _fhp->open_right_edge;
+        _exportFhp->p_rest_convert  = _fhp->p_rest_convert;
     }
 }
 
@@ -379,34 +394,61 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 // Exporte sur un CLONE de la grille courante — la simulation affichée à
 // l'écran n'est jamais modifiée par l'export, quelle que soit sa durée.
 - (void)_exportVideoDurationSeconds:(NSInteger)seconds toURL:(NSURL *)url {
-    CAMState *exportCam = cam_create(_cam->size);
-    if (!exportCam) {
-        [self _showExportAlertWithMessage:@"Impossible d'allouer la grille d'export."];
-        return;
+    // Deux chemins totalement separes selon le mode actif au moment du
+    // clic sur Exporter : CAM classique (comme avant), ou le gaz FHP
+    // (chapitre 16) -- avant cet ajout, l'export ignorait _fhp et
+    // clonait une grille CAM vide et sans rapport en mode FHP.
+    BOOL exportingFHP = [CAMPalettePanel sharedPalette].fhpMode && _fhp != NULL;
+
+    CAMState *exportCam = NULL;
+    FHPState *exportFhp = NULL;
+    uint32_t w, h;
+
+    if (exportingFHP) {
+        exportFhp = fhp_create(_fhp->width, _fhp->height);
+        if (!exportFhp) {
+            [self _showExportAlertWithMessage:@"Impossible d'allouer le gaz d'export."];
+            return;
+        }
+        _exportFhp = exportFhp;
+        uint32_t total = _fhp->width * _fhp->height;
+        for (int d = 0; d < 6; d++) memcpy(exportFhp->dir_a[d], _fhp->dir_a[d], total);
+        memcpy(exportFhp->obstacle, _fhp->obstacle, total);
+        memcpy(exportFhp->rest_a, _fhp->rest_a, total);
+        exportFhp->open_right_edge = _fhp->open_right_edge;
+        exportFhp->p_rest_convert  = _fhp->p_rest_convert;
+        w = exportFhp->width;
+        h = exportFhp->height;
+    } else {
+        exportCam = cam_create(_cam->size);
+        if (!exportCam) {
+            [self _showExportAlertWithMessage:@"Impossible d'allouer la grille d'export."];
+            return;
+        }
+        _exportCam = exportCam; // rendu visible a compileRule: pour la resynchro
+        uint32_t total = _cam->width * _cam->height;
+        memcpy(exportCam->plane0_a, _cam->plane0_a, total);
+        memcpy(exportCam->plane1_a, _cam->plane1_a, total);
+        memcpy(exportCam->plane2_a, _cam->plane2_a, total);
+        memcpy(exportCam->plane3_a, _cam->plane3_a, total);
+        exportCam->margolus_phase = _cam->margolus_phase;
+        w = exportCam->width;
+        h = exportCam->height;
     }
-    _exportCam = exportCam; // rendu visible a compileRule: pour la resynchro
-    uint32_t total = _cam->width * _cam->height;
-    memcpy(exportCam->plane0_a, _cam->plane0_a, total);
-    memcpy(exportCam->plane1_a, _cam->plane1_a, total);
-    memcpy(exportCam->plane2_a, _cam->plane2_a, total);
-    memcpy(exportCam->plane3_a, _cam->plane3_a, total);
-    exportCam->margolus_phase = _cam->margolus_phase;
 
     [[NSFileManager defaultManager] removeItemAtURL:url error:nil]; // AVAssetWriter refuse d'écraser
 
     NSError *error = nil;
     AVAssetWriter *writer = [AVAssetWriter assetWriterWithURL:url fileType:AVFileTypeMPEG4 error:&error];
     if (!writer) {
-        cam_destroy(exportCam);
-        _exportCam = NULL;
+        if (exportCam) { cam_destroy(exportCam); _exportCam = NULL; }
+        if (exportFhp) { fhp_destroy(exportFhp); _exportFhp = NULL; }
         [self _showExportAlertWithMessage:error.localizedDescription ?: @"Échec de création du writer vidéo."];
         return;
     }
 
     const NSInteger fps = 30;
     const NSInteger totalFrames = seconds * fps;
-    uint32_t w = exportCam->width;
-    uint32_t h = exportCam->height;
 
     // Échelle : "auto" vise ~768 px de côté comme avant (tient dans un
     // écran 1280x800 en plein écran) ; sinon la valeur tapée dans le
@@ -459,13 +501,18 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     [input requestMediaDataWhenReadyOnQueue:queue usingBlock:^{
         Document *strongSelf = weakSelf;
-        if (!strongSelf) { cam_destroy(exportCam); return; }
+        if (!strongSelf) {
+            if (exportCam) cam_destroy(exportCam);
+            if (exportFhp) fhp_destroy(exportFhp);
+            return;
+        }
 
         while (input.isReadyForMoreMediaData && frameIndex < totalFrames) {
             // Consomme une demande d'inversion en attente : c'est le
             // thread d'export LUI-MEME qui fait l'echange, jamais
             // l'exterieur -- exportCam n'est touche que d'un seul cote.
-            if (strongSelf->_pendingExportReverse) {
+            // Sans objet pour le gaz FHP (aucune notion d'inversion la).
+            if (exportCam && strongSelf->_pendingExportReverse) {
                 uint8_t *tmpExport = exportCam->plane0_a;
                 exportCam->plane0_a = exportCam->plane1_a;
                 exportCam->plane1_a = tmpExport;
@@ -476,7 +523,11 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
             CVPixelBufferPoolCreatePixelBuffer(NULL, adaptor.pixelBufferPool, &pixelBuffer);
             if (!pixelBuffer) break;
 
-            [strongSelf _fillPixelBuffer:pixelBuffer fromCAM:exportCam scale:scale];
+            if (exportFhp) {
+                [strongSelf _fillPixelBufferFHP:pixelBuffer fromFHP:exportFhp scale:scale];
+            } else {
+                [strongSelf _fillPixelBuffer:pixelBuffer fromCAM:exportCam scale:scale];
+            }
 
             CMTime frameTime = CMTimeMake(frameIndex, (int32_t)fps);
             [adaptor appendPixelBuffer:pixelBuffer withPresentationTime:frameTime];
@@ -493,7 +544,9 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
             // celle des regles Margolus reversibles (chapitre 14) via
             // _timeReversed, relu ici a chaque frame de la meme maniere.
             if (strongSelf.isRunning) {
-                if (strongSelf->_timeReversed && cam_can_reverse()) {
+                if (exportFhp) {
+                    fhp_step(exportFhp); // avance le CLONE de gaz, jamais _fhp affiche
+                } else if (strongSelf->_timeReversed && cam_can_reverse()) {
                     cam_step_back(exportCam);
                 } else {
                     cam_step(exportCam); // avance le CLONE, jamais la grille visible
@@ -505,9 +558,10 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         if (frameIndex >= totalFrames) {
             [input markAsFinished];
             [writer finishWritingWithCompletionHandler:^{
-                cam_destroy(exportCam);
+                if (exportCam) cam_destroy(exportCam);
+                if (exportFhp) fhp_destroy(exportFhp);
                 Document *doneSelf = weakSelf;
-                if (doneSelf) doneSelf->_exportCam = NULL;
+                if (doneSelf) { doneSelf->_exportCam = NULL; doneSelf->_exportFhp = NULL; }
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (writer.status == AVAssetWriterStatusFailed) {
                         [weakSelf _showExportAlertWithMessage:writer.error.localizedDescription ?: @"Échec de l'écriture vidéo."];
@@ -574,6 +628,69 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
                 lastRowRGB[x * 3 + 0] = rgb[0];
                 lastRowRGB[x * 3 + 1] = rgb[1];
                 lastRowRGB[x * 3 + 2] = rgb[2];
+            }
+            lastSourceY = sy;
+        }
+
+        uint8_t *row = dest + (size_t)oy * bytesPerRow;
+        for (uint32_t ox = 0; ox < vw; ox++) {
+            uint32_t sx = (uint32_t)(ox / scale);
+            if (sx >= w) sx = w - 1;
+            size_t idx = (size_t)ox * 4;
+            row[idx + 0] = lastRowRGB[sx * 3 + 2]; // B
+            row[idx + 1] = lastRowRGB[sx * 3 + 1]; // G
+            row[idx + 2] = lastRowRGB[sx * 3 + 0]; // R
+            row[idx + 3] = 255;
+        }
+    }
+
+    free(lastRowRGB);
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+}
+
+// Meme structure que _fillPixelBuffer:fromCAM:, mais source le gaz FHP
+// (densite 0-6 + obstacle) au lieu des 4 plans CAM -- miroir exact de
+// _renderFHPFrame dans CAMView.m, pour que l'export ressemble a l'ecran.
+- (void)_fillPixelBufferFHP:(CVPixelBufferRef)pixelBuffer fromFHP:(FHPState *)fhp scale:(double)scale {
+    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+
+    uint8_t *dest = (uint8_t *)CVPixelBufferGetBaseAddress(pixelBuffer);
+    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
+    uint32_t w = fhp->width;
+    uint32_t h = fhp->height;
+    uint32_t vw = (uint32_t)(bytesPerRow / 4);
+    uint32_t vh = (uint32_t)CVPixelBufferGetHeight(pixelBuffer);
+
+    // Table de 7 couleurs (densite 0-6), meme calcul que _renderFHPFrame.
+    uint8_t densityTable[7][3];
+    for (int d = 0; d <= 6; d++) {
+        uint8_t level = (uint8_t)(d * 255 / 6);
+        uint8_t r = level, g = level, b = level;
+        if (d > 0) { b = (uint8_t)(level * 0.6 + 60); }
+        densityTable[d][0] = r; densityTable[d][1] = g; densityTable[d][2] = b;
+    }
+
+    uint8_t *lastRowRGB = malloc((size_t)w * 3);
+    uint32_t lastSourceY = UINT32_MAX;
+
+    for (uint32_t oy = 0; oy < vh; oy++) {
+        uint32_t sy = (uint32_t)(oy / scale);
+        if (sy >= h) sy = h - 1;
+
+        if (sy != lastSourceY) {
+            for (uint32_t x = 0; x < w; x++) {
+                size_t si = (size_t)sy * w + x;
+                uint8_t r, g, b;
+                if (fhp->obstacle[si]) {
+                    r = 255; g = 140; b = 0; // orange, meme famille que le CAM-B
+                } else {
+                    uint8_t density = fhp_local_density(fhp, x, sy);
+                    uint8_t *rgb = densityTable[density];
+                    r = rgb[0]; g = rgb[1]; b = rgb[2];
+                }
+                lastRowRGB[x * 3 + 0] = r;
+                lastRowRGB[x * 3 + 1] = g;
+                lastRowRGB[x * 3 + 2] = b;
             }
             lastSourceY = sy;
         }
@@ -668,6 +785,21 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     // sans condition sur fhpMode : "tout" veut dire tout, y compris ce
     // qu'on ne regarde pas actuellement.
     if (_fhp) fhp_clear(_fhp);
+    [_camView renderFrame];
+    [self _resyncExportCamFromLive];
+}
+
+// Efface UN SEUL plan (0-3), buffers courants ET suivants (meme raison
+// que dans _clearPlanes : sinon un swap peut ressusciter l'ancien
+// etat). Concept propre au CAM classique -- ne touche pas au gaz FHP,
+// qui n'a pas de notion de "plan 0-3" au meme sens.
+- (void)_clearPlane:(int)plane {
+    if (plane < 0 || plane > 3) return;
+    uint32_t total = _cam->width * _cam->height;
+    uint8_t *grids_a[4] = { _cam->plane0_a, _cam->plane1_a, _cam->plane2_a, _cam->plane3_a };
+    uint8_t *grids_b[4] = { _cam->plane0_b, _cam->plane1_b, _cam->plane2_b, _cam->plane3_b };
+    memset(grids_a[plane], 0, total);
+    memset(grids_b[plane], 0, total);
     [_camView renderFrame];
     [self _resyncExportCamFromLive];
 }

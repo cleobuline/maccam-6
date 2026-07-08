@@ -49,6 +49,29 @@ void forth_decode_entry_hex(ForthVM *vm, uint32_t entry, int row_odd) {
     vm->rnd    = (entry >> 7) & 1;
 }
 
+// N/CUSTOM (chapitre 7, voisinages arbitraires) : bit i de l'entree =
+// i-eme voisin declare, bit custom_count = RAND. Les autres champs de
+// voisinage sont remis a zero -- une regle custom qui lirait NORTH par
+// habitude verrait toujours 0, plutot qu'un residu de la LUT precedente.
+// Confort : si (0,0,0) et/ou (0,0,1) font partie de la declaration,
+// CENTER et CENTER' sont cables sur ces bits-la.
+void forth_decode_entry_custom(ForthVM *vm, uint32_t entry) {
+    vm->center = vm->center_prime = 0;
+    vm->north = vm->south = vm->east = vm->west = 0;
+    vm->neast = vm->nwest = vm->seast = vm->swest = 0;
+    vm->north_p = vm->south_p = vm->east_p = vm->west_p = 0;
+
+    for (int i = 0; i < vm->custom_count; i++) {
+        uint8_t bit = (entry >> i) & 1;
+        vm->custom[i] = bit;
+        if (vm->custom_def[i].dx == 0 && vm->custom_def[i].dy == 0) {
+            if (vm->custom_def[i].plane == 0) vm->center       = bit;
+            else                              vm->center_prime = bit;
+        }
+    }
+    vm->rnd = (entry >> vm->custom_count) & 1;
+}
+
 // N/VONN, tableau 7.2 : les diagonales du plan 0 sont remplacées par les
 // voisins von Neumann du plan 1.
 //   bit0=CENTER bit1=CENTER' bit2=EAST' bit3=WEST' bit4=SOUTH' bit5=NORTH'
@@ -333,6 +356,27 @@ static void exec_tokens(ForthVM *vm, char tokens[FORTH_MAX_TOKENS][32], int star
         else if (str_eq(token, "HEX-SW"))   forth_push(vm, vm->hex_sw);
         else if (str_eq(token, "HEX-SE"))   forth_push(vm, vm->hex_se);
 
+        // --- voisins declares par N/CUSTOM : NBR0..NBR11, dans l'ordre
+        // de declaration. Un mot utilisateur peut evidemment les
+        // baptiser ( : NORD NBR1 ; ) -- le dictionnaire existant s'en
+        // charge sans rien de plus.
+        else if (strncmp(token, "NBR", 3) == 0 && token[3] != '\0') {
+            char *endp;
+            long n = strtol(token + 3, &endp, 10);
+            if (*endp == '\0' && n >= 0 && n < FORTH_CUSTOM_MAX) {
+                if ((int)n >= vm->custom_count) {
+                    fprintf(stderr, "CAM-FORTH: %s — seulement %d voisin(s) "
+                            "déclaré(s) par N/CUSTOM ; vaut 0.\n",
+                            token, vm->custom_count);
+                }
+                forth_push(vm, ((int)n < vm->custom_count) ? vm->custom[n] : 0);
+            } else {
+                fprintf(stderr, "CAM-FORTH: mot inconnu '%s' (NBR0..NBR%d)\n",
+                        token, FORTH_CUSTOM_MAX - 1);
+                forth_push(vm, 0);
+            }
+        }
+
         // --- voisins de Margolus (bloc 2x2, §12.5) ---
         else if (str_eq(token, "CW"))       forth_push(vm, vm->cw);
         else if (str_eq(token, "CCW"))      forth_push(vm, vm->ccw);
@@ -536,12 +580,12 @@ int32_t forth_eval(ForthVM *vm, const char *rule) {
 }
 
 // prototypes des builders (définis plus bas, utilisés par make_table)
-static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body);
+static int build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body);
 
 void make_table(uint8_t *lut, const char *rule) {
     ForthVM vm;
     forth_init(&vm);
-    build_lut_from_body(&vm, lut, rule);
+    (void)build_lut_from_body(&vm, lut, rule);
 }
 
 // --- helpers de construction, partagés par MAKE-TABLE (§ dispatch) ---
@@ -567,13 +611,18 @@ static void warn_camb_if_needed(uint8_t used_mask) {
 // (plan 2, plan 3) — expédiée par >PLN2/>PLN3/>PLNB. Dans les deux cas,
 // CENTER etc. désignent les plans PROPRES de la moitié, et &CENTER /
 // &CENTER' les centres de l'autre moitié (bits 11-12 de l'entrée).
-static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
+// Retourne le OU des out_mask rencontres pendant la construction --
+// c'est ce qui permet a MAKE-TABLE de savoir si une regle N/CUSTOM a
+// expedie >PLN1 (custom_p1_used), sans variable globale de liaison.
+static int build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
     int half = vm->half; // 0 = CAM-A, 1 = CAM-B
     int lo = half ? 2 : 0;             // slot du plan "bas" de la paire
     uint8_t lo_bit = half ? 0x4 : 0x1; // bits correspondants de out_mask
     uint8_t hi_bit = half ? 0x8 : 0x2;
-    int vonn = (vm->neighborhood == FORTH_NEIGHBORHOOD_VONN);
-    int hex  = (vm->neighborhood == FORTH_NEIGHBORHOOD_HEX);
+    int vonn   = (vm->neighborhood == FORTH_NEIGHBORHOOD_VONN);
+    int hex    = (vm->neighborhood == FORTH_NEIGHBORHOOD_HEX);
+    int custom = (vm->neighborhood == FORTH_NEIGHBORHOOD_CUSTOM);
+    int used_mask = 0;
 
     // Tokenise UNE SEULE FOIS ici : "body" ne change jamais a travers
     // les 256/1024/8192 iterations qui suivent. Avant cette correction,
@@ -582,6 +631,40 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
     // le tokeniseur re-decoupait le meme texte des milliers de fois.
     char word_tokens[FORTH_MAX_TOKENS][32];
     int word_count = tokenize(body, word_tokens);
+
+    // N/CUSTOM (chapitre 7) : LUT de 2^(count+1) entrees -- un bit par
+    // voisin declare, dans l'ordre de declaration, plus RAND sur le bit
+    // count. Le reste du buffer (jusqu'a FORTH_LUT_SIZE) est remis a
+    // zero pour ne pas trainer de residus d'une compilation precedente.
+    // 2 bits par entree comme en Moore : bit0 = plan 0 (>PLN0 ou sommet
+    // de pile), bit1 = plan 1 (>PLN1 UNIQUEMENT -- pas d'ECHO par
+    // defaut ici, car CENTER n'existe que si (0,0,0) est declare ; si
+    // rien n'est expedie, le moteur fait traverser le plan 1 inchange,
+    // exactement comme en Margolus).
+    if (custom) {
+        if (vm->custom_count <= 0) {
+            fprintf(stderr, "CAM-FORTH: MAKE-TABLE en N/CUSTOM sans aucun "
+                            "voisin déclaré — table non construite.\n");
+            return 0;
+        }
+        memset(lut, 0, FORTH_LUT_SIZE);
+        uint32_t nentries = 1u << (vm->custom_count + 1); // + RAND
+        for (uint32_t entry = 0; entry < nentries; entry++) {
+            forth_decode_entry_custom(vm, entry);
+            vm->sp = 0;
+            vm->out_mask = 0;
+
+            exec_tokens(vm, word_tokens, 0, word_count);
+
+            uint8_t plo = (vm->out_mask & lo_bit) ? vm->out_val[lo]
+                                                  : ((forth_pop(vm) != 0) ? 1 : 0);
+            uint8_t phi = (vm->out_mask & hi_bit) ? vm->out_val[lo + 1] : 0;
+            used_mask |= vm->out_mask;
+
+            lut[entry] = plo | (phi << 1);
+        }
+        return used_mask;
+    }
 
     // N/HEX (chapitre 16) : table dediee, plus petite (256 entrees,
     // pas de sondes ni de plan 1 -- le gaz FHP est mono-plan). On
@@ -597,9 +680,10 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
 
             uint8_t p0 = (vm->out_mask & 0x1) ? vm->out_val[0]
                                               : ((forth_pop(vm) != 0) ? 1 : 0);
+            used_mask |= vm->out_mask;
             lut[entry] = p0;
         }
-        return;
+        return used_mask;
     }
 
     for (uint32_t entry = 0; entry < FORTH_LUT_SIZE; entry++) {
@@ -617,9 +701,11 @@ static void build_lut_from_body(ForthVM *vm, uint8_t *lut, const char *body) {
                                               : ((forth_pop(vm) != 0) ? 1 : 0);
         uint8_t phi = (vm->out_mask & hi_bit) ? vm->out_val[lo + 1]
                                               : vm->center; // ECHO par défaut
+        used_mask |= vm->out_mask;
 
         lut[entry] = plo | (phi << 1);
     }
+    return used_mask;
 }
 
 // Tables de bloc Margolus complètes (FORTH_MARG_TABLE_SIZE entrées) :
@@ -693,8 +779,49 @@ static void build_margolus_from_body(ForthVM *vm,
     if (half == 0) warn_camb_if_needed(used_mask);
 }
 
-int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
-    char tokens[FORTH_MAX_TOKENS][32];
+// Baptise un voisin custom : cree (ou remplace) un mot du dictionnaire
+// dont le corps est "NBRn" -- le nom declare devient un mot Forth comme
+// un autre, resolu par la machinerie existante. Un nom peut donc
+// legitimement MASQUER un mot cable (CENTER, NORTH...) : le dictionnaire
+// est consulte avant les mots internes, et c'est exactement l'effet
+// recherche ("0 0 0 CENTER" redonne au CENTER habituel son sens).
+// Refuse les noms de la forme NBRn : le mot aurait pour corps son
+// propre nom, recursion infinie garantie a la premiere evaluation.
+static void custom_register_name(ForthVM *vm, const char *name, int idx) {
+    if (strncmp(name, "NBR", 3) == 0) {
+        char *endp;
+        (void)strtol(name + 3, &endp, 10);
+        if (name[3] != '\0' && *endp == '\0') {
+            fprintf(stderr, "CAM-FORTH: N/CUSTOM — '%s' est réservé "
+                    "(indexation des voisins), nom ignoré.\n", name);
+            return;
+        }
+    }
+
+    char body[16];
+    snprintf(body, sizeof(body), "NBR%d", idx);
+
+    for (int d = 0; d < vm->dict_size; d++) {
+        if (str_eq(vm->dict[d].name, name)) {
+            strncpy(vm->dict[d].body, body, FORTH_BODY_MAXLEN - 1);
+            vm->dict[d].token_count = tokenize(body, vm->dict[d].tokens);
+            return;
+        }
+    }
+    if (vm->dict_size < FORTH_DICT_SIZE) {
+        strncpy(vm->dict[vm->dict_size].name, name, FORTH_WORD_MAXLEN - 1);
+        vm->dict[vm->dict_size].name[FORTH_WORD_MAXLEN - 1] = '\0';
+        strncpy(vm->dict[vm->dict_size].body, body, FORTH_BODY_MAXLEN - 1);
+        vm->dict[vm->dict_size].token_count =
+            tokenize(body, vm->dict[vm->dict_size].tokens);
+        vm->dict_size++;
+    } else {
+        fprintf(stderr, "CAM-FORTH: N/CUSTOM — dictionnaire plein, "
+                "nom '%s' ignoré (utilisez NBR%d).\n", name, idx);
+    }
+}
+
+int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {    char tokens[FORTH_MAX_TOKENS][32];
     char buf[4096];
     strncpy(buf, source, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
@@ -873,6 +1000,79 @@ int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
             continue;
         }
 
+        // --- N/CUSTOM ... END-CUSTOM (chapitre 7, voisinages libres) ---
+        // Le corps est une suite de "dx dy plane [NOM]" : trois nombres,
+        // puis un nom OPTIONNEL qui baptise ce voisin (il devient un mot
+        // du dictionnaire equivalant a NBRn -- les NBRn restent toujours
+        // disponibles). Commentaires ( ... ) admis n'importe ou.
+        // Convention BOUSSOLE : dx > 0 = est, dy > 0 = nord (haut de
+        // l'ecran). plane 0 ou 1 : les plans propres de la demi-machine
+        // courante. Jusqu'a FORTH_CUSTOM_MAX (12) voisins, comme le
+        // vrai CAM-8.
+        if (str_eq(tokens[i], "N/CUSTOM")) {
+            i++;
+            int32_t trip[3];
+            int t = 0, n = 0, dropped = 0;
+            int awaiting_name = 0; // un triplet valide vient d'etre clos
+            while (i < count && !str_eq(tokens[i], "END-CUSTOM")) {
+                if (tokens[i][0] == '(') { // commentaire au fil des triplets
+                    while (i < count) {
+                        size_t len = strlen(tokens[i]);
+                        int closes = (len > 0 && tokens[i][len - 1] == ')');
+                        i++;
+                        if (closes) break;
+                    }
+                    continue;
+                }
+                char *endp;
+                long v = strtol(tokens[i], &endp, 10);
+                if (*endp == '\0') {
+                    awaiting_name = 0; // le triplet suivant commence sans nom
+                    trip[t++] = (int32_t)v;
+                    if (t == 3) {
+                        t = 0;
+                        if (n >= FORTH_CUSTOM_MAX) { dropped++; i++; continue; }
+                        if (trip[0] < -127 || trip[0] > 127 ||
+                            trip[1] < -127 || trip[1] > 127) {
+                            fprintf(stderr, "CAM-FORTH: N/CUSTOM — déplacement "
+                                    "(%d,%d) hors limites (±127), voisin ignoré.\n",
+                                    trip[0], trip[1]);
+                            i++; continue;
+                        }
+                        if (trip[2] != 0 && trip[2] != 1) {
+                            fprintf(stderr, "CAM-FORTH: N/CUSTOM — plane %d "
+                                    "invalide (0 ou 1), voisin ignoré.\n", trip[2]);
+                            i++; continue;
+                        }
+                        vm->custom_def[n].dx    = (int8_t)trip[0];
+                        vm->custom_def[n].dy    = (int8_t)trip[1];
+                        vm->custom_def[n].plane = (uint8_t)trip[2];
+                        n++;
+                        awaiting_name = 1; // un nom PEUT suivre
+                    }
+                } else if (awaiting_name && t == 0) {
+                    // le jeton qui suit un triplet complet est son nom
+                    custom_register_name(vm, tokens[i], n - 1);
+                    awaiting_name = 0;
+                } else {
+                    fprintf(stderr, "CAM-FORTH: N/CUSTOM — jeton '%s' "
+                            "inattendu %s, ignoré.\n", tokens[i],
+                            t ? "au milieu d'un triplet" : "(nombres attendus)");
+                }
+                i++;
+            }
+            i++; // saute END-CUSTOM
+            if (t != 0)
+                fprintf(stderr, "CAM-FORTH: N/CUSTOM — triplet incomplet "
+                        "en fin de déclaration, ignoré.\n");
+            if (dropped)
+                fprintf(stderr, "CAM-FORTH: N/CUSTOM — %d voisin(s) au-delà "
+                        "de la limite de %d, ignoré(s).\n", dropped, FORTH_CUSTOM_MAX);
+            vm->custom_count = n;
+            vm->neighborhood = FORTH_NEIGHBORHOOD_CUSTOM;
+            continue;
+        }
+
         // --- MAKE-TABLE NOM ---
         // Construit la table du voisinage COURANT, comme dans le vrai
         // CAM Forth : N/MOORE → LUT 10 bits, N/MARG → table de bloc 2x2.
@@ -911,12 +1111,29 @@ int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
                 }
             } else if (!margolus && tables) {
                 if (vm->half == 1) {
-                    build_lut_from_body(vm, tables->lut_b, body);
-                    tables->lut_b_neighborhood = vm->neighborhood;
-                    built |= FORTH_BUILT_LUT_B;
+                    if (vm->neighborhood == FORTH_NEIGHBORHOOD_CUSTOM) {
+                        // Le moteur ne sait pas (encore) echantillonner
+                        // des offsets libres sur les plans 2-3 : plutot
+                        // qu'une table silencieusement fausse, on refuse
+                        // franchement -- meme politique que >PLN2/>PLN3
+                        // en Margolus a l'epoque.
+                        fprintf(stderr, "CAM-FORTH: N/CUSTOM n'est pas câblé "
+                                "pour CAM-B pour l'instant — table ignorée.\n");
+                    } else {
+                        (void)build_lut_from_body(vm, tables->lut_b, body);
+                        tables->lut_b_neighborhood = vm->neighborhood;
+                        built |= FORTH_BUILT_LUT_B;
+                    }
                 } else {
-                    build_lut_from_body(vm, tables->lut, body);
+                    int used = build_lut_from_body(vm, tables->lut, body);
                     tables->lut_neighborhood = vm->neighborhood;
+                    if (vm->neighborhood == FORTH_NEIGHBORHOOD_CUSTOM) {
+                        if (vm->custom_count <= 0) { i++; continue; } // rien construit
+                        memcpy(tables->custom_nbrs, vm->custom_def,
+                               sizeof(vm->custom_def));
+                        tables->custom_count   = vm->custom_count;
+                        tables->custom_p1_used = (used & 0x2) ? 1 : 0;
+                    }
                     built |= FORTH_BUILT_LUT;
                 }
             }

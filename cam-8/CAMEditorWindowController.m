@@ -114,13 +114,14 @@
         return;
     }
 
-    // VM statique persistante entre compilations
+    // VM réinitialisée EN ENTIER à chaque compilation : la source décrit
+    // toute la machine, rien ne doit fuir d'une compilation à l'autre.
+    // L'ancien reset partiel (vm.dict_size = 0 seulement) laissait
+    // traîner le VOISINAGE déclaré : compiler une règle N/MARG ou
+    // N/CUSTOM puis une règle sans déclaration recompilait la seconde
+    // dans le voisinage de la première, avec des offsets périmés.
     static ForthVM vm;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ forth_init(&vm); });
-
-    // reset le dictionnaire à chaque compilation
-    vm.dict_size = 0;
+    forth_init(&vm);
 
     ForthTables tables;
     memset(&tables, 0, sizeof(tables));
@@ -152,6 +153,11 @@
             _statusLabel.stringValue = @"✅ Compilé (LUT + Margolus) — mode Moore actif.";
         } else if (built & FORTH_BUILT_MARGOLUS) {
             _statusLabel.stringValue = @"✅ Compilé — voisinage de Margolus.";
+        } else if ((built & FORTH_BUILT_LUT) &&
+                   tables.lut_neighborhood == FORTH_NEIGHBORHOOD_CUSTOM) {
+            _statusLabel.stringValue = [NSString stringWithFormat:
+                @"✅ Compilé — voisinage personnalisé (%d voisin%s).",
+                tables.custom_count, tables.custom_count > 1 ? "s" : ""];
         } else {
             _statusLabel.stringValue = @"✅ Compilé et lancé !";
         }

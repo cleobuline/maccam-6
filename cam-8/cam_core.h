@@ -24,7 +24,8 @@ typedef enum {
 typedef enum {
     CAM_MODE_LUT      = 0,
     CAM_MODE_MARGOLUS = 1,
-    CAM_MODE_HEX      = 2  // chapitre 16 : grille pseudo-hexagonale (FHP)
+    CAM_MODE_HEX      = 2, // chapitre 16 : grille pseudo-hexagonale (FHP)
+    CAM_MODE_CUSTOM   = 3  // chapitre 7 : voisinage libre N/CUSTOM (offsets déclarés)
 } CAMStepMode;
 
 typedef struct {

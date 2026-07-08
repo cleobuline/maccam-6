@@ -57,7 +57,8 @@ typedef enum {
     FORTH_NEIGHBORHOOD_MOORE    = 0,
     FORTH_NEIGHBORHOOD_VONN     = 1,
     FORTH_NEIGHBORHOOD_MARGOLUS = 2,
-    FORTH_NEIGHBORHOOD_HEX      = 3
+    FORTH_NEIGHBORHOOD_HEX      = 3,
+    FORTH_NEIGHBORHOOD_CUSTOM   = 4  // N/CUSTOM ... END-CUSTOM (voisinage libre)
 } ForthNeighborhood;
 
 // N/HEX (chapitre 16, FHP) : grille pseudo-hexagonale par decalage en
@@ -65,6 +66,26 @@ typedef enum {
 // 4/8 habituelles. Encodage horaire a partir de l'est : E, NE, NW, W,
 // SW, SE. bit0=CENTER bit1..6=E,NE,NW,W,SW,SE bit7=RAND
 #define FORTH_HEX_LUT_SIZE 256
+
+// N/CUSTOM (chapitre 7 du livre, voisinages arbitraires) : jusqu'a 12
+// voisins declares librement par des triplets (dx, dy, plane). 12 est
+// la limite du vrai CAM-8 -- et pas un hasard ici non plus : 12 voisins
+// + le pseudo-voisin RAND = 13 bits = 8192 entrees, EXACTEMENT
+// FORTH_LUT_SIZE. La LUT custom reutilise donc le buffer lut existant
+// sans en changer la taille.
+// Convention BOUSSOLE (celle du livre, pas celle de la memoire) :
+//   dx > 0 = est, dy > 0 = NORD (vers le haut de l'ecran).
+// plane : 0 ou 1 -- les plans PROPRES de la demi-machine courante,
+// comme partout ailleurs (CAM-A : plans 0-1).
+#define FORTH_CUSTOM_MAX 12
+
+// Un voisin declare : deplacement (dx, dy) et plan source. int8_t
+// suffit largement (le vrai CAM-8 limitait les kicks bien avant ±127).
+typedef struct {
+    int8_t  dx;
+    int8_t  dy;
+    uint8_t plane; // 0 ou 1
+} ForthCustomNbr;
 
 typedef struct {
     int32_t   stack[FORTH_STACK_SIZE];
@@ -109,6 +130,16 @@ typedef struct {
     // Voisinage courant, sélectionné par les déclarations N/MOORE,
     // N/VONN et N/MARG dans la source. Défaut : Moore.
     ForthNeighborhood neighborhood;
+
+    // N/CUSTOM : la declaration courante (liste de triplets) et les
+    // valeurs decodees pour l'entree en cours. Les mots NBR0..NBR11
+    // lisent custom[] dans l'ORDRE de declaration. Si un triplet
+    // (0,0,0) ou (0,0,1) est declare, CENTER / CENTER' sont cables en
+    // plus, par confort -- une regle existante qui lit CENTER reste
+    // lisible telle quelle.
+    ForthCustomNbr custom_def[FORTH_CUSTOM_MAX];
+    int            custom_count;
+    uint8_t        custom[FORTH_CUSTOM_MAX];
 
     // Expédition vers les plans (>PLN0 .. >PLN3, §5.4 du livre) :
     // out_val[n] reçoit la valeur dépilée par >PLNn, out_mask trace quels
@@ -174,6 +205,17 @@ typedef struct {
     // cycle_len == 0 : pas de déclaration, le moteur garde ALT-GRID-PH.
     ForthCycleStep cycle[FORTH_CYCLE_MAX];
     int            cycle_len;
+
+    // N/CUSTOM : quand lut_neighborhood == FORTH_NEIGHBORHOOD_CUSTOM,
+    // la LUT (dans le champ lut habituel, 2^(count+1) entrees utilisees,
+    // RAND sur le bit count) ne suffit pas au moteur : il lui faut AUSSI
+    // la liste des offsets a echantillonner. custom_p1_used suit la meme
+    // logique que margolus_p1_used : 0 = le plan 1 traverse inchange
+    // (une LUT custom sans (0,0,0) declare ne PEUT PAS calculer l'ECHO,
+    // donc pas de valeur par defaut raisonnable autre que l'identite).
+    ForthCustomNbr custom_nbrs[FORTH_CUSTOM_MAX];
+    int            custom_count;
+    int            custom_p1_used;
 } ForthTables;
 
 void    forth_init(ForthVM *vm);
@@ -182,6 +224,10 @@ int32_t forth_pop(ForthVM *vm);
 void    forth_decode_entry(ForthVM *vm, uint32_t entry);
 void    forth_decode_entry_vonn(ForthVM *vm, uint32_t entry);
 void    forth_decode_entry_hex(ForthVM *vm, uint32_t entry, int row_odd);
+// N/CUSTOM : bit i de l'entree = voisin custom_def[i] (ordre de
+// declaration), bit custom_count = RAND. Cable aussi CENTER/CENTER'
+// si les triplets (0,0,0)/(0,0,1) font partie de la declaration.
+void    forth_decode_entry_custom(ForthVM *vm, uint32_t entry);
 void    forth_decode_margolus_corner(ForthVM *vm, uint8_t nw, uint8_t ne,
                                       uint8_t sw, uint8_t se, ForthCorner corner);
 // Décodage complet : bloc plan 0, bloc plan 1 (voisins primés) et PHASE

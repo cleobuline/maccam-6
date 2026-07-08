@@ -184,13 +184,36 @@
         uint32_t w = _fhpState->width, h = _fhpState->height;
 
         if (tool == CAMToolSpray) {
+            int r = size;
+            int density = _palette.density;
+
+            if (_palette.sprayIsotropic) {
+                // Perturbation LOCALE et SANS biais directionnel : injecte
+                // independamment sur les 6 canaux a la fois, comme jeter
+                // un caillou dans l'eau -- ideal pour observer une onde
+                // qui s'amortit sans qu'un vent dirige ne la pousse.
+                for (int dy = -r; dy <= r; dy++)
+                    for (int dx = -r; dx <= r; dx++)
+                        if (dx*dx + dy*dy <= r*r) {
+                            int nx = gx + dx, ny = gy + dy;
+                            if (nx >= 0 && nx < (int)w && ny >= 0 && ny < (int)h) {
+                                for (int d = 0; d < 6; d++) {
+                                    if ((int)(arc4random_uniform(100)) < density) {
+                                        _fhpState->dir_a[d][ny * w + nx] = 1;
+                                    }
+                                }
+                            }
+                        }
+                [self renderFrame];
+                if (self.onGridPainted) self.onGridPainted();
+                return;
+            }
+
             // Vent dirige : injecte du gaz UNIQUEMENT sur le canal HEX-E,
             // avec une densite probabiliste (le champ "% ALEATOIRE" de la
             // palette) dans le rayon du pinceau. C'est ce qui manquait
             // pour former un vrai jet oriente au lieu du grouillement
             // isotrope de Lancer.
-            int r = size;
-            int density = _palette.density;
             for (int dy = -r; dy <= r; dy++)
                 for (int dx = -r; dx <= r; dx++)
                     if (dx*dx + dy*dy <= r*r) {
@@ -202,6 +225,7 @@
                         }
                     }
             [self renderFrame];
+            if (self.onGridPainted) self.onGridPainted();
             return;
         }
 
@@ -228,6 +252,7 @@
         }
 
         [self renderFrame];
+        if (self.onGridPainted) self.onGridPainted();
         return;
     }
 

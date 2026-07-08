@@ -24,6 +24,16 @@ static uint8_t g_lut_hex[FORTH_HEX_LUT_SIZE];
 static int     g_lut_hex_ready = 0;
 static int     g_lut_ready = 0;
 
+// N/CUSTOM (chapitre 7) : LUT dediee + liste des offsets a
+// echantillonner. Buffer SEPARE de g_lut, comme g_lut_hex : recompiler
+// une regle Moore ne doit pas ecraser la derniere regle custom chargee
+// (et reciproquement), chaque mode garde sa table prete.
+static uint8_t        g_lut_custom[FORTH_LUT_SIZE];
+static ForthCustomNbr g_custom_nbrs[FORTH_CUSTOM_MAX];
+static int            g_custom_count = 0;
+static int            g_custom_p1_used = 0;
+static int            g_custom_ready = 0;
+
 static CAMStepMode g_step_mode = CAM_MODE_LUT;
 static int          g_lut_neighborhood = FORTH_NEIGHBORHOOD_MOORE; // MOORE ou VONN
 static uint8_t      g_lut_b[FORTH_LUT_SIZE];
@@ -196,6 +206,13 @@ void cam_apply_forth_tables(const ForthTables *tables, int built) {
             memcpy(g_lut_hex, tables->lut, FORTH_HEX_LUT_SIZE);
             g_lut_hex_ready = 1;
             g_step_mode = CAM_MODE_HEX;
+        } else if (tables->lut_neighborhood == FORTH_NEIGHBORHOOD_CUSTOM) {
+            memcpy(g_lut_custom, tables->lut, FORTH_LUT_SIZE);
+            memcpy(g_custom_nbrs, tables->custom_nbrs, sizeof(g_custom_nbrs));
+            g_custom_count   = tables->custom_count;
+            g_custom_p1_used = tables->custom_p1_used;
+            g_custom_ready   = 1;
+            g_step_mode = CAM_MODE_CUSTOM;
         } else {
             memcpy(g_lut, tables->lut, FORTH_LUT_SIZE);
             g_lut_neighborhood = tables->lut_neighborhood;
@@ -783,11 +800,68 @@ static void cam_step_hex(CAMState *cam) {
     cam_swap_buffers(cam);
 }
 
+// N/CUSTOM (chapitre 7) : voisinage arbitraire. Pour chaque cellule, le
+// moteur echantillonne les offsets declares (convention boussole :
+// dx > 0 = est, dy > 0 = nord, donc y - dy en memoire ou y croit vers
+// le bas), assemble l'entree bit par bit dans l'ORDRE de declaration,
+// ajoute RAND en dernier bit, et consulte la LUT custom. Regle de la
+// demi-machine A uniquement pour l'instant : les plans 2-3 traversent
+// inchanges, comme en mode HEX.
+static void cam_step_custom(CAMState *cam) {
+    if (!g_custom_ready || g_custom_count <= 0) return; // pas de regle chargee
+
+    uint32_t w = cam->width;
+    uint32_t h = cam->height;
+    int n = g_custom_count;
+
+    // Plan 1 : ecrit bloc la boucle si la regle expedie >PLN1, sinon il
+    // traverse inchange -- sans (0,0,0) declare, une LUT custom ne peut
+    // meme pas calculer l'ECHO, l'identite est le seul defaut honnete.
+    if (!g_custom_p1_used)
+        memcpy(cam->plane1_b, cam->plane1_a, (size_t)w * h);
+    memcpy(cam->plane2_b, cam->plane2_a, (size_t)w * h);
+    memcpy(cam->plane3_b, cam->plane3_a, (size_t)w * h);
+
+    for (uint32_t y = 0; y < h; y++) {
+        // Rangee source de chaque voisin, precalculee UNE fois par ligne
+        // (le modulo signe ne se paie qu'ici, pas a chaque cellule).
+        size_t         rowbase[FORTH_CUSTOM_MAX];
+        const uint8_t *src[FORTH_CUSTOM_MAX];
+        for (int i = 0; i < n; i++) {
+            long ny = (long)y - g_custom_nbrs[i].dy; // dy > 0 = nord
+            ny %= (long)h; if (ny < 0) ny += (long)h;
+            rowbase[i] = (size_t)ny * w;
+            src[i] = g_custom_nbrs[i].plane ? cam->plane1_a : cam->plane0_a;
+        }
+
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t entry = 0;
+            for (int i = 0; i < n; i++) {
+                long nx = (long)x + g_custom_nbrs[i].dx;
+                nx %= (long)w; if (nx < 0) nx += (long)w;
+                if (src[i][rowbase[i] + (size_t)nx])
+                    entry |= (1u << i);
+            }
+            entry |= ((uint32_t)rng_bit() << n); // RAND, dernier bit
+
+            uint8_t out = g_lut_custom[entry];
+            size_t  idx = (size_t)y * w + x;
+            cam->plane0_b[idx] = out & 1;
+            if (g_custom_p1_used)
+                cam->plane1_b[idx] = (out >> 1) & 1;
+        }
+    }
+
+    cam_swap_buffers(cam);
+}
+
 void cam_step(CAMState *cam) {
     if (g_step_mode == CAM_MODE_MARGOLUS) {
         cam_step_margolus(cam);
     } else if (g_step_mode == CAM_MODE_HEX) {
         cam_step_hex(cam);
+    } else if (g_step_mode == CAM_MODE_CUSTOM) {
+        cam_step_custom(cam);
     } else {
         cam_step_lut(cam);
     }
