@@ -30,19 +30,11 @@ static const char *RULE_TIME_TUNNEL =
     CAMState *_exportCam; // non-NULL PENDANT un export en cours ; permet a
                           // compileRule: de resynchroniser le clone avec
                           // la grille visible (voir _exportVideoDurationSeconds:)
-    FHPState *_exportFhp; // meme principe que _exportCam, mais pour le gaz
-                          // FHP -- non-NULL PENDANT un export lance alors
-                          // que le mode FHP est actif. Avant son ajout,
-                          // l'export ignorait totalement _fhp et clonait
-                          // une grille CAM vide et sans rapport en mode FHP.
-    BOOL _pendingExportReverse; // demande d'inversion en attente, posee par
-                                // onReverse (thread principal) et consommee
-                                // par la boucle d'export (thread d'export) --
-                                // seul le thread d'export touche les
-                                // pointeurs de plans d'exportCam, jamais
-                                // l'exterieur : evite la race condition
+    BOOL _pendingExportReverse; // LE SIGNAL SYNCHRONE POUR L'INVERSION TEMPORELLE
+    BOOL _pendingExportSync;    // LE SIGNAL SYNCHRONE POUR LE DESSIN ET LA COMPILATION
 }
-@property (nonatomic, assign) BOOL isRunning;@end
+@property (nonatomic, assign) BOOL isRunning;
+@end
 
 @implementation Document
 
@@ -59,7 +51,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         _isRunning = NO; // en pause au départ — l'utilisateur décide quand lancer
         _frameInterval = 1.0 / 30.0; // 30 fps par défaut, comme avant
         cam_set_rule(RULE_TIME_TUNNEL);
-        _fhp = fhp_create(_cam->width, _cam->height); // toujours cree, mais inerte tant que fhpMode est OFF
+        _fhp = fhp_create(_cam->width, _cam->height); // toujours cree, mais inerte tant que fhpMode is OFF
     }
     return self;
 }
@@ -81,11 +73,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     NSView *contentView = windowController.window.contentView;
     NSRect frame = contentView.bounds;
 
-    // Le nib par défaut du template "document-based app" contient un
-    // placeholder ("Put your document contents here" ou équivalent).
-    // On le retire avant de construire notre propre UI, sinon il reste
-    // visible en dessous dès que la fenêtre est plus grande que le
-    // splitView initial.
+    // Nettoyage du placeholder par défaut
     for (NSView *defaultSubview in [contentView.subviews copy]) {
         [defaultSubview removeFromSuperview];
     }
@@ -108,13 +96,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     NSView *editorContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width * 0.35, frame.size.height)];
     editorContainer.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    // Deux boutons-icônes compacts, ancrés en bas à gauche. Largeur FIXE
-    // (NSViewMaxXMargin, pas WidthSizable) : ils ne s'étirent jamais, donc
-    // ne peuvent plus se chevaucher quand le panneau change de largeur —
-    // c'est la zone de texte au-dessus qui absorbe toute l'élasticité.
-    // Icônes : images template système (pas d'émoji dans les titres, ça
-    // tronque en "…" sur certains systèmes) — vectorielles, adaptées au
-    // mode sombre, disponibles depuis toujours.
     NSButton *compileBtn = [NSButton buttonWithImage:[NSImage imageNamed:NSImageNameActionTemplate]
                                               target:self
                                               action:@selector(compileRule:)];
@@ -127,9 +108,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     NSButton *exportBtn = [NSButton buttonWithTitle:@"🎬"
                                              target:self
                                              action:@selector(exportVideo:)];
-    // 56 px : le bezel arrondi mange ~14 px de marge interne de chaque
-    // côté, et à 44 px le clap ne "rentrait" plus → NSButton tronquait
-    // en "…". On interdit aussi explicitement la troncature (clipping).
     exportBtn.frame = NSMakeRect(60, 10, 56, 30);
     exportBtn.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
     exportBtn.font = [NSFont systemFontOfSize:16];
@@ -137,10 +115,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     exportBtn.toolTip = @"Exporter en vidéo…";
     [editorContainer addSubview:exportBtn];
 
-    // Champ d'échelle vidéo, réglable : "auto" (défaut, vise ~768px de
-    // côté comme avant) ou une valeur numérique explicite (0.5, 1, 2,
-    // 3...) — multiplie la taille NATIVE de la grille, pas la taille
-    // d'écran. 0.5 = video a moitie resolution, 2 = double, etc.
     _videoScaleField = [NSTextField textFieldWithString:@"auto"];
     _videoScaleField.frame = NSMakeRect(124, 14, 60, 22);
     _videoScaleField.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
@@ -148,9 +122,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     _videoScaleField.toolTip = @"Échelle vidéo : \"auto\" (~768px), ou une valeur comme 0.5, 1, 2, 3 — multiplie la taille native de la grille.";
     [editorContainer addSubview:_videoScaleField];
 
-    // Texte — scrollableTextView configure correctement l'élasticité
-    // (textContainer qui suit la largeur, verticallyResizable, scrollers, etc.)
-    // au lieu de tout assembler à la main comme avant.
     NSScrollView *sv = [NSTextView scrollableTextView];
     sv.frame = NSMakeRect(10, 50,
                            editorContainer.bounds.size.width - 20,
@@ -176,10 +147,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     [editorContainer addSubview:sv];
     self.ruleTextView = tv;
 
-    // Si un fichier a été chargé avant que la fenêtre existe, le texte
-    // affiche déjà sa règle (ci-dessus). On ne touche PAS à la LUT du
-    // moteur CAM ici — elle ne change que quand l'utilisateur clique
-    // "Compiler la Règle".
     _pendingRuleSource = nil;
 
     [splitView addSubview:leftContainer];
@@ -193,8 +160,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     palette.onRandomize = ^(int d) { [weakSelf _randomizePlanes:d]; };
     palette.onClear = ^(void) { [weakSelf _clearPlanes]; };
     palette.onClearPlane = ^(int plane) { [weakSelf _clearPlane:plane]; };
-    // (Plus de câblage "voisinage" : le mode Moore/Margolus est déterminé
-    // par la règle compilée — MAKE-TABLE ou MAKE-TABLE-MARGOLUS.)
     palette.onSizeChange = ^(int newSize) {
         [weakSelf _recreateGridAtSize:newSize];
     };
@@ -207,49 +172,37 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         if (!strongSelf || !strongSelf->_cam) return;
 
         if (cam_can_reverse()) {
-            // Mode Margolus inversible (chapitre 14) : le bouton inverse la
-            // FLÈCHE DU TEMPS — la simulation recule tant qu'on ne rappuie
-            // pas. La grille n'est pas touchée ici : c'est le tick qui
-            // choisit cam_step ou cam_step_back.
             strongSelf->_timeReversed = !strongSelf->_timeReversed;
         } else {
-            // Mode LUT (règles du second ordre, ex. TIME-TUNNEL) : échanger
-            // présent (plan 0) et passé (plan 1) inverse le temps.
             uint8_t *tmp = strongSelf->_cam->plane0_a;
             strongSelf->_cam->plane0_a = strongSelf->_cam->plane1_a;
             strongSelf->_cam->plane1_a = tmp;
             [strongSelf->_camView renderFrame];
-
-            // Si un export tourne, on ne touche PAS ses pointeurs de plans
-            // directement depuis ce thread (main) -- le thread d'export
-            // pourrait etre en plein cam_step au meme instant. On pose un
-            // drapeau ; c'est la boucle d'export elle-meme qui fera
-            // l'echange, en toute securite, avant son prochain pas.
+            
             strongSelf->_pendingExportReverse = YES;
         }
     };
     [palette showPalette];
-    // Dans Document.m
 
-    _camView.palette = palette; // <--- AJOUTER CETTE LIGNE
+    _camView.palette = palette;
     palette.camState = _cam;
-    palette.isRunning = self.isRunning; // synchronise le bouton avec l'état pause du document
+    palette.isRunning = self.isRunning;
 
-    _camView.onGridPainted = ^{ [weakSelf _resyncExportCamFromLive]; };
-    // ... le reste de ton code ...
-    // Démarrage
+    // --- INTERCEPTION DU PINCEAU POUR L'EXPORT ASYNCHRONE ---
+    _camView.onGridPainted = ^{
+        Document *strongSelf = weakSelf;
+        if (strongSelf && strongSelf->_exportCam) {
+            strongSelf->_pendingExportSync = YES;
+        }
+    };
+    // --------------------------------------------------------
+
     [self _randomizePlanes:50];
     CVDisplayLinkCreateWithActiveCGDisplays(&_displayLink);
     CVDisplayLinkSetOutputCallback(_displayLink, &DisplayLinkCallback, (__bridge void *)self);
     CVDisplayLinkStart(_displayLink);
 }
 
-
-// Recrée entièrement la grille à une nouvelle taille (menu TAILLE de la
-// palette). Toujours destructif sur le contenu — c'est le prix pour
-// changer une dimension câblée dans CAMState — mais on réapplique la
-// dernière règle compilée avec succès, pour ne pas repartir sur
-// TIME-TUNNEL par défaut à chaque changement.
 - (void)_recreateGridAtSize:(int)newSize {
     CAMGridSize size;
     switch (newSize) {
@@ -258,7 +211,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         case 1024: size = CAM_SIZE_1024; break;
         default:   size = CAM_SIZE_256;  break;
     }
-    if (_cam && _cam->size == size) return; // déjà à cette taille
+    if (_cam && _cam->size == size) return;
 
     BOOL wasRunning = self.isRunning;
     self.isRunning = NO;
@@ -266,7 +219,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     CAMState *old = _cam;
     CAMState *fresh = cam_create(size);
-    if (!fresh) { NSBeep(); return; } // grille trop grande pour la mémoire : on garde l'ancienne
+    if (!fresh) { NSBeep(); return; }
 
     _cam = fresh;
     cam_destroy(old);
@@ -295,14 +248,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         if (self.isRunning) {
             if (fhpOn && self->_fhp) {
                 self->_fhp->open_right_edge = pal.openChannel;
-                self->_fhp->p_rest_convert = pal.fhpViscosity;
                 if (pal.continuousWind) {
-                    // Reinjection du gaz HEX-E le long du bord gauche, A
-                    // CHAQUE pas -- exactement la methode qui a produit
-                    // un vrai sillage dans les tests hors-app (fhp_wake).
-                    // Un Spray manuel ponctuel ne peut pas reproduire ca :
-                    // sans reinjection continue, tout gaz injecte se
-                    // disperse et s'equilibre au lieu de former un flux.
                     int density = pal.density;
                     uint32_t H = self->_fhp->height;
                     for (uint32_t row = 0; row < H; row++) {
@@ -326,31 +272,10 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     _timeReversed = NO; // nouvelle règle : le temps repart vers l'avant
     _currentRuleSource = [self.ruleTextView.string copy];
     cam_set_rule([_currentRuleSource UTF8String]);
-    [self _resyncExportCamFromLive];
-}
 
-// Copie l'etat ACTUEL de la grille visible vers le clone d'export, si un
-// export tourne. Appelee apres TOUTE action qui change le contenu de la
-// grille (Compiler, Lancer, Effacer tout, et le pinceau/Spray/Cercle/
-// Carre via CAMView) -- sans ca, seule la compilation d'une regle se
-// repercutait sur la video, pas les autres facons de modifier la grille.
-// Couvre AUSSI le gaz FHP (_exportFhp), meme principe.
-- (void)_resyncExportCamFromLive {
+    // --- ABANDON DU MEMCPY DIRECT SUR LE MAIN THREAD ---
     if (_exportCam && _exportCam->width == _cam->width && _exportCam->height == _cam->height) {
-        uint32_t total = _cam->width * _cam->height;
-        memcpy(_exportCam->plane0_a, _cam->plane0_a, total);
-        memcpy(_exportCam->plane1_a, _cam->plane1_a, total);
-        memcpy(_exportCam->plane2_a, _cam->plane2_a, total);
-        memcpy(_exportCam->plane3_a, _cam->plane3_a, total);
-        _exportCam->margolus_phase = _cam->margolus_phase;
-    }
-    if (_exportFhp && _fhp && _exportFhp->width == _fhp->width && _exportFhp->height == _fhp->height) {
-        uint32_t total = _fhp->width * _fhp->height;
-        for (int d = 0; d < 6; d++) memcpy(_exportFhp->dir_a[d], _fhp->dir_a[d], total);
-        memcpy(_exportFhp->obstacle, _fhp->obstacle, total);
-        memcpy(_exportFhp->rest_a, _fhp->rest_a, total);
-        _exportFhp->open_right_edge = _fhp->open_right_edge;
-        _exportFhp->p_rest_convert  = _fhp->p_rest_convert;
+        _pendingExportSync = YES; // Signal envoyé à la fonderie
     }
 }
 
@@ -376,7 +301,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     NSInteger seconds = secondsField.integerValue;
     if (seconds <= 0) seconds = 1;
-    if (seconds > 600) seconds = 600; // garde-fou : 10 min max
+    if (seconds > 600) seconds = 600;
 
     NSSavePanel *savePanel = [NSSavePanel savePanel];
     savePanel.allowedFileTypes = @[@"mp4"];
@@ -391,70 +316,36 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     }];
 }
 
-// Exporte sur un CLONE de la grille courante — la simulation affichée à
-// l'écran n'est jamais modifiée par l'export, quelle que soit sa durée.
 - (void)_exportVideoDurationSeconds:(NSInteger)seconds toURL:(NSURL *)url {
-    // Deux chemins totalement separes selon le mode actif au moment du
-    // clic sur Exporter : CAM classique (comme avant), ou le gaz FHP
-    // (chapitre 16) -- avant cet ajout, l'export ignorait _fhp et
-    // clonait une grille CAM vide et sans rapport en mode FHP.
-    BOOL exportingFHP = [CAMPalettePanel sharedPalette].fhpMode && _fhp != NULL;
-
-    CAMState *exportCam = NULL;
-    FHPState *exportFhp = NULL;
-    uint32_t w, h;
-
-    if (exportingFHP) {
-        exportFhp = fhp_create(_fhp->width, _fhp->height);
-        if (!exportFhp) {
-            [self _showExportAlertWithMessage:@"Impossible d'allouer le gaz d'export."];
-            return;
-        }
-        _exportFhp = exportFhp;
-        uint32_t total = _fhp->width * _fhp->height;
-        for (int d = 0; d < 6; d++) memcpy(exportFhp->dir_a[d], _fhp->dir_a[d], total);
-        memcpy(exportFhp->obstacle, _fhp->obstacle, total);
-        memcpy(exportFhp->rest_a, _fhp->rest_a, total);
-        exportFhp->open_right_edge = _fhp->open_right_edge;
-        exportFhp->p_rest_convert  = _fhp->p_rest_convert;
-        w = exportFhp->width;
-        h = exportFhp->height;
-    } else {
-        exportCam = cam_create(_cam->size);
-        if (!exportCam) {
-            [self _showExportAlertWithMessage:@"Impossible d'allouer la grille d'export."];
-            return;
-        }
-        _exportCam = exportCam; // rendu visible a compileRule: pour la resynchro
-        uint32_t total = _cam->width * _cam->height;
-        memcpy(exportCam->plane0_a, _cam->plane0_a, total);
-        memcpy(exportCam->plane1_a, _cam->plane1_a, total);
-        memcpy(exportCam->plane2_a, _cam->plane2_a, total);
-        memcpy(exportCam->plane3_a, _cam->plane3_a, total);
-        exportCam->margolus_phase = _cam->margolus_phase;
-        w = exportCam->width;
-        h = exportCam->height;
+    CAMState *exportCam = cam_create(_cam->size);
+    if (!exportCam) {
+        [self _showExportAlertWithMessage:@"Impossible d'allouer la grille d'export."];
+        return;
     }
+    _exportCam = exportCam;
+    uint32_t total = _cam->width * _cam->height;
+    memcpy(exportCam->plane0_a, _cam->plane0_a, total);
+    memcpy(exportCam->plane1_a, _cam->plane1_a, total);
+    memcpy(exportCam->plane2_a, _cam->plane2_a, total);
+    memcpy(exportCam->plane3_a, _cam->plane3_a, total);
+    exportCam->margolus_phase = _cam->margolus_phase;
 
-    [[NSFileManager defaultManager] removeItemAtURL:url error:nil]; // AVAssetWriter refuse d'écraser
+    [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
 
     NSError *error = nil;
     AVAssetWriter *writer = [AVAssetWriter assetWriterWithURL:url fileType:AVFileTypeMPEG4 error:&error];
     if (!writer) {
-        if (exportCam) { cam_destroy(exportCam); _exportCam = NULL; }
-        if (exportFhp) { fhp_destroy(exportFhp); _exportFhp = NULL; }
+        cam_destroy(exportCam);
+        _exportCam = NULL;
         [self _showExportAlertWithMessage:error.localizedDescription ?: @"Échec de création du writer vidéo."];
         return;
     }
 
     const NSInteger fps = 30;
     const NSInteger totalFrames = seconds * fps;
+    uint32_t w = exportCam->width;
+    uint32_t h = exportCam->height;
 
-    // Échelle : "auto" vise ~768 px de côté comme avant (tient dans un
-    // écran 1280x800 en plein écran) ; sinon la valeur tapée dans le
-    // champ (0.5, 1, 2, 3...) multiplie directement la taille NATIVE
-    // de la grille — permet aussi bien un export allégé (0.5x) qu'un
-    // agrandissement supérieur à 3x.
     NSString *scaleText = [_videoScaleField.stringValue stringByTrimmingCharactersInSet:
                             [NSCharacterSet whitespaceCharacterSet]];
     double scale;
@@ -463,15 +354,15 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         scale = (autoScale < 1.0) ? 1.0 : autoScale;
     } else {
         scale = [scaleText doubleValue];
-        if (scale <= 0.0) scale = 1.0; // saisie invalide (texte, zéro, négatif) : repli sûr
-        if (scale > 8.0) scale = 8.0;   // garde-fou : évite une vidéo démesurée par erreur de frappe
+        if (scale <= 0.0) scale = 1.0;
+        if (scale > 8.0) scale = 8.0;
     }
 
     uint32_t vw = (uint32_t)round(w * scale);
     uint32_t vh = (uint32_t)round(h * scale);
-    if (vw < 16) vw = 16; // garde-fou : jamais une vidéo degenerée (ex. 0.01x)
+    if (vw < 16) vw = 16;
     if (vh < 16) vh = 16;
-    if (vw % 2 != 0) vw += 1; // H.264 exige des dimensions paires
+    if (vw % 2 != 0) vw += 1;
     if (vh % 2 != 0) vh += 1;
 
     NSDictionary *videoSettings = @{
@@ -501,55 +392,44 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     [input requestMediaDataWhenReadyOnQueue:queue usingBlock:^{
         Document *strongSelf = weakSelf;
-        if (!strongSelf) {
-            if (exportCam) cam_destroy(exportCam);
-            if (exportFhp) fhp_destroy(exportFhp);
-            return;
-        }
+        if (!strongSelf) { cam_destroy(exportCam); return; }
 
         while (input.isReadyForMoreMediaData && frameIndex < totalFrames) {
-            // Consomme une demande d'inversion en attente : c'est le
-            // thread d'export LUI-MEME qui fait l'echange, jamais
-            // l'exterieur -- exportCam n'est touche que d'un seul cote.
-            // Sans objet pour le gaz FHP (aucune notion d'inversion la).
-            if (exportCam && strongSelf->_pendingExportReverse) {
+            
+            // --- PROTECTION ET CONSOMMATION DES SIGNAUX SUR LE BACKGROUND THREAD ---
+            if (strongSelf->_pendingExportReverse) {
                 uint8_t *tmpExport = exportCam->plane0_a;
                 exportCam->plane0_a = exportCam->plane1_a;
                 exportCam->plane1_a = tmpExport;
                 strongSelf->_pendingExportReverse = NO;
             }
 
+            if (strongSelf->_pendingExportSync) {
+                uint32_t totalPlanes = strongSelf->_cam->width * strongSelf->_cam->height;
+                memcpy(exportCam->plane0_a, strongSelf->_cam->plane0_a, totalPlanes);
+                memcpy(exportCam->plane1_a, strongSelf->_cam->plane1_a, totalPlanes);
+                memcpy(exportCam->plane2_a, strongSelf->_cam->plane2_a, totalPlanes);
+                memcpy(exportCam->plane3_a, strongSelf->_cam->plane3_a, totalPlanes);
+                exportCam->margolus_phase = strongSelf->_cam->margolus_phase;
+                strongSelf->_pendingExportSync = NO;
+            }
+            // ------------------------------------------------------------------------
+
             CVPixelBufferRef pixelBuffer = NULL;
             CVPixelBufferPoolCreatePixelBuffer(NULL, adaptor.pixelBufferPool, &pixelBuffer);
             if (!pixelBuffer) break;
 
-            if (exportFhp) {
-                [strongSelf _fillPixelBufferFHP:pixelBuffer fromFHP:exportFhp scale:scale];
-            } else {
-                [strongSelf _fillPixelBuffer:pixelBuffer fromCAM:exportCam scale:scale];
-            }
+            [strongSelf _fillPixelBuffer:pixelBuffer fromCAM:exportCam scale:scale];
 
             CMTime frameTime = CMTimeMake(frameIndex, (int32_t)fps);
             [adaptor appendPixelBuffer:pixelBuffer withPresentationTime:frameTime];
             CVPixelBufferRelease(pixelBuffer);
 
-            // Lecture EN DIRECT de l'etat Play/Pause a CHAQUE frame (pas
-            // un instantane au demarrage de l'export) : permet d'appuyer
-            // sur Stop PENDANT que l'export tourne en tache de fond pour
-            // des effets de transition (figer sur une recomposition). En
-            // pause, on ecrit quand meme la frame (repetition de la meme
-            // image) pour que la duree totale de la video reste celle
-            // demandee. L'inversion ⏪ des regles du second ordre (comme
-            // TIME-TUNNEL) est geree plus haut via _pendingExportReverse ;
-            // celle des regles Margolus reversibles (chapitre 14) via
-            // _timeReversed, relu ici a chaque frame de la meme maniere.
             if (strongSelf.isRunning) {
-                if (exportFhp) {
-                    fhp_step(exportFhp); // avance le CLONE de gaz, jamais _fhp affiche
-                } else if (strongSelf->_timeReversed && cam_can_reverse()) {
+                if (strongSelf->_timeReversed && cam_can_reverse()) {
                     cam_step_back(exportCam);
                 } else {
-                    cam_step(exportCam); // avance le CLONE, jamais la grille visible
+                    cam_step(exportCam);
                 }
             }
             frameIndex++;
@@ -558,23 +438,12 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
         if (frameIndex >= totalFrames) {
             [input markAsFinished];
             [writer finishWritingWithCompletionHandler:^{
-                if (exportCam) cam_destroy(exportCam);
-                if (exportFhp) fhp_destroy(exportFhp);
+                cam_destroy(exportCam);
                 Document *doneSelf = weakSelf;
-                if (doneSelf) { doneSelf->_exportCam = NULL; doneSelf->_exportFhp = NULL; }
+                if (doneSelf) doneSelf->_exportCam = NULL;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (writer.status == AVAssetWriterStatusFailed) {
                         [weakSelf _showExportAlertWithMessage:writer.error.localizedDescription ?: @"Échec de l'écriture vidéo."];
-                    } else {
-                        // Signal explicite de fin : sans lui, aucun moyen de
-                        // savoir si l'export tourne encore ou a deja fini
-                        // en silence -- crucial pour les manips en direct
-                        // (Stop, ⏪, Compiler) qui n'ont d'effet que PENDANT
-                        // que l'export ecrit encore des frames. L'ecriture
-                        // n'est PAS cadencee en temps reel : une video de
-                        // 60s peut finir de s'exporter en quelques secondes
-                        // reelles seulement.
-                        [weakSelf _showExportSuccessMessageForURL:url];
                     }
                 });
             }];
@@ -582,10 +451,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     }];
 }
 
-// scale a virgule (0.5, 1, 2, 3...) : echantillonnage au plus proche
-// voisin dans les DEUX directions plutot que la replication de blocs
-// entiers — generalise proprement a l'agrandissement ET a la reduction
-// (la replication de blocs ne savait faire QUE l'agrandissement entier).
 - (void)_fillPixelBuffer:(CVPixelBufferRef)pixelBuffer fromCAM:(CAMState *)cam scale:(double)scale {
     CVPixelBufferLockBaseAddress(pixelBuffer, 0);
 
@@ -597,19 +462,11 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     uint32_t vh = (uint32_t)CVPixelBufferGetHeight(pixelBuffer);
     int vis = [CAMPalettePanel sharedPalette].visibleMask;
 
-    // Meme technique que CAMView.renderFrame : table de 16 couleurs
-    // precalculee une fois, plutot qu'un appel a cam_palette() (jusqu'a
-    // 5 branches) par ligne source. Le masque de visibilite est deja
-    // applique en amont, sur le nibble d'index -- la table elle-meme
-    // sert pour toutes les combinaisons de visibilite.
     uint8_t table[16][3];
     for (int n = 0; n < 16; n++)
         cam_palette(n & 1, (n >> 1) & 1, (n >> 2) & 1, (n >> 3) & 1,
                     &table[n][0], &table[n][1], &table[n][2]);
 
-    // Cache par ligne SOURCE (évite de retraiter la même ligne quand
-    // scale > 1 : plusieurs pixels de sortie retombent sur la même
-    // cellule source).
     uint8_t *lastRowRGB = malloc((size_t)w * 3);
     uint32_t lastSourceY = UINT32_MAX;
 
@@ -648,69 +505,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
 }
 
-// Meme structure que _fillPixelBuffer:fromCAM:, mais source le gaz FHP
-// (densite 0-6 + obstacle) au lieu des 4 plans CAM -- miroir exact de
-// _renderFHPFrame dans CAMView.m, pour que l'export ressemble a l'ecran.
-- (void)_fillPixelBufferFHP:(CVPixelBufferRef)pixelBuffer fromFHP:(FHPState *)fhp scale:(double)scale {
-    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
-
-    uint8_t *dest = (uint8_t *)CVPixelBufferGetBaseAddress(pixelBuffer);
-    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
-    uint32_t w = fhp->width;
-    uint32_t h = fhp->height;
-    uint32_t vw = (uint32_t)(bytesPerRow / 4);
-    uint32_t vh = (uint32_t)CVPixelBufferGetHeight(pixelBuffer);
-
-    // Table de 7 couleurs (densite 0-6), meme calcul que _renderFHPFrame.
-    uint8_t densityTable[7][3];
-    for (int d = 0; d <= 6; d++) {
-        uint8_t level = (uint8_t)(d * 255 / 6);
-        uint8_t r = level, g = level, b = level;
-        if (d > 0) { b = (uint8_t)(level * 0.6 + 60); }
-        densityTable[d][0] = r; densityTable[d][1] = g; densityTable[d][2] = b;
-    }
-
-    uint8_t *lastRowRGB = malloc((size_t)w * 3);
-    uint32_t lastSourceY = UINT32_MAX;
-
-    for (uint32_t oy = 0; oy < vh; oy++) {
-        uint32_t sy = (uint32_t)(oy / scale);
-        if (sy >= h) sy = h - 1;
-
-        if (sy != lastSourceY) {
-            for (uint32_t x = 0; x < w; x++) {
-                size_t si = (size_t)sy * w + x;
-                uint8_t r, g, b;
-                if (fhp->obstacle[si]) {
-                    r = 255; g = 140; b = 0; // orange, meme famille que le CAM-B
-                } else {
-                    uint8_t density = fhp_local_density(fhp, x, sy);
-                    uint8_t *rgb = densityTable[density];
-                    r = rgb[0]; g = rgb[1]; b = rgb[2];
-                }
-                lastRowRGB[x * 3 + 0] = r;
-                lastRowRGB[x * 3 + 1] = g;
-                lastRowRGB[x * 3 + 2] = b;
-            }
-            lastSourceY = sy;
-        }
-
-        uint8_t *row = dest + (size_t)oy * bytesPerRow;
-        for (uint32_t ox = 0; ox < vw; ox++) {
-            uint32_t sx = (uint32_t)(ox / scale);
-            if (sx >= w) sx = w - 1;
-            size_t idx = (size_t)ox * 4;
-            row[idx + 0] = lastRowRGB[sx * 3 + 2]; // B
-            row[idx + 1] = lastRowRGB[sx * 3 + 1]; // G
-            row[idx + 2] = lastRowRGB[sx * 3 + 0]; // R
-            row[idx + 3] = 255;
-        }
-    }
-
-    free(lastRowRGB);
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-}
-
 - (void)_showExportAlertWithMessage:(NSString *)message {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Export vidéo — erreur";
@@ -719,19 +513,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     [alert runModal];
 }
 
-- (void)_showExportSuccessMessageForURL:(NSURL *)url {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Export terminé";
-    alert.informativeText = [NSString stringWithFormat:
-        @"La vidéo a fini de s'écrire : %@\n\nTout Stop/⏪/Compiler cliqué après ce moment n'a plus aucun effet sur ce fichier — l'écriture n'était pas cadencée en temps réel, elle a pu se terminer bien avant que la durée demandée ne se soit écoulée à l'écran.",
-        url.lastPathComponent];
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert runModal];
-}
-
-#pragma mark - Save / Load (NSDocument)
-
-// Appelé par Cmd+S / Cmd+Maj+S : sérialise le texte de la règle telle quelle.
 - (NSData *)dataOfType:(NSString *)typeName error:(NSError **)outError {
     NSString *source = self.ruleTextView ? self.ruleTextView.string : (_pendingRuleSource ?: @"");
     NSData *data = [source dataUsingEncoding:NSUTF8StringEncoding];
@@ -746,8 +527,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     return data;
 }
 
-// Appelé par Cmd+O (ou double-clic sur un fichier) : peut arriver AVANT
-// que la fenêtre existe, d'où le stockage temporaire dans _pendingRuleSource.
 - (BOOL)readFromData:(NSData *)data ofType:(NSString *)typeName error:(NSError **)outError {
     NSString *source = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!source) {
@@ -761,8 +540,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     _pendingRuleSource = source;
 
-    // Si la fenêtre est déjà construite (rechargement d'un document déjà ouvert),
-    // on applique tout de suite au lieu d'attendre windowControllerDidLoadNib:.
     if (self.ruleTextView) {
         self.ruleTextView.string = source;
         _pendingRuleSource = nil;
@@ -770,52 +547,40 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     return YES;
 }
-
-// Note : n'appelle PAS cam_set_rule — seul un clic sur "Compiler la Règle"
-// doit modifier la LUT du moteur CAM.
+- (void)_clearPlane:(int)plane {
+    if (!_cam) return;
+    uint32_t total = _cam->width * _cam->height;
+    uint8_t *grids_a[4] = { _cam->plane0_a, _cam->plane1_a, _cam->plane2_a, _cam->plane3_a };
+    uint8_t *grids_b[4] = { _cam->plane0_b, _cam->plane1_b, _cam->plane2_b, _cam->plane3_b };
+    
+    // Effacement strict du plan ciblé
+    memset(grids_a[plane & 3], 0, total);
+    memset(grids_b[plane & 3], 0, total);
+    
+    [_camView renderFrame];
+    
+    // Interception pour la fonderie vidéo si un export est en cours
+    if (_exportCam) {
+        _pendingExportSync = YES;
+    }
+}
 - (void)_clearPlanes {
-    // "Effacer tout" au sens strict : les QUATRE plans, buffers courants
-    // ET suivants (sinon un swap peut ressusciter l'ancien état).
     uint32_t total = _cam->width * _cam->height;
     memset(_cam->plane0_a, 0, total); memset(_cam->plane0_b, 0, total);
     memset(_cam->plane1_a, 0, total); memset(_cam->plane1_b, 0, total);
     memset(_cam->plane2_a, 0, total); memset(_cam->plane2_b, 0, total);
     memset(_cam->plane3_a, 0, total); memset(_cam->plane3_b, 0, total);
-    // Efface aussi le gaz FHP (les 6 canaux ET les obstacles peints) —
-    // sans condition sur fhpMode : "tout" veut dire tout, y compris ce
-    // qu'on ne regarde pas actuellement.
     if (_fhp) fhp_clear(_fhp);
     [_camView renderFrame];
-    [self _resyncExportCamFromLive];
-}
-
-// Efface UN SEUL plan (0-3), buffers courants ET suivants (meme raison
-// que dans _clearPlanes : sinon un swap peut ressusciter l'ancien
-// etat). Concept propre au CAM classique -- ne touche pas au gaz FHP,
-// qui n'a pas de notion de "plan 0-3" au meme sens.
-- (void)_clearPlane:(int)plane {
-    if (plane < 0 || plane > 3) return;
-    uint32_t total = _cam->width * _cam->height;
-    uint8_t *grids_a[4] = { _cam->plane0_a, _cam->plane1_a, _cam->plane2_a, _cam->plane3_a };
-    uint8_t *grids_b[4] = { _cam->plane0_b, _cam->plane1_b, _cam->plane2_b, _cam->plane3_b };
-    memset(grids_a[plane], 0, total);
-    memset(grids_b[plane], 0, total);
-    [_camView renderFrame];
-    [self _resyncExportCamFromLive];
 }
 
 - (void)_randomizePlanes:(int)density {
-    // Mode FHP : seme le gaz sur les 6 canaux directionnels (pas de
-    // notion de "plan selectionne" ici — le gaz n'a que ses 6 directions).
     if ([CAMPalettePanel sharedPalette].fhpMode && _fhp) {
         for (int d = 0; d < 6; d++) fhp_seed_random(_fhp, (FHPDirection)d, density);
         [_camView renderFrame];
         return;
     }
 
-    // Sème dans le plan SÉLECTIONNÉ de la palette, sans toucher aux
-    // autres : le décor (germes, parois, chronos CAM-B) survit au Lancer.
-    // "Effacer tout" reste le moyen de vraiment tout vider.
     uint32_t total = _cam->width * _cam->height;
     int plane = [CAMPalettePanel sharedPalette].currentPlane;
     uint8_t *grids_a[4] = { _cam->plane0_a, _cam->plane1_a, _cam->plane2_a, _cam->plane3_a };
@@ -825,17 +590,8 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     for (uint32_t i = 0; i < total; i++)
         grids_a[plane & 3][i] = (arc4random_uniform(100) < (uint32_t)density);
     [_camView renderFrame];
-    [self _resyncExportCamFromLive];
 }
 
-
-#pragma mark - N/USER : coller un bitmap (Cmd+V)
-
-// L'interprétation logicielle du connecteur N/USER du CAM-6 : le monde
-// extérieur entre par le presse-papier. L'image est ajustée-centrée dans
-// la grille, seuillée à 50%% de luminance, avec polarité automatique
-// (la figure = le camp minoritaire de pixels). Seul le plan sélectionné
-// dans la palette est écrasé.
 - (IBAction)paste:(id)sender {
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     NSArray *found = [pb readObjectsForClasses:@[[NSImage class]] options:nil];
@@ -844,8 +600,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     uint32_t gw = _cam->width, gh = _cam->height;
 
-    // rendu de l'image dans un bitmap RGBA à la taille de la grille,
-    // ajusté et centré
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
         initWithBitmapDataPlanes:NULL pixelsWide:gw pixelsHigh:gh
         bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
@@ -868,10 +622,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     [ctx flushGraphics];
     [NSGraphicsContext restoreGraphicsState];
 
-    // seuillage et polarité, calculés DANS le rectangle de l'image
-    // seulement (sinon le letterboxing noir fausse le vote et le fond
-    // blanc d'un logo devient la "figure"). Les pixels transparents ne
-    // touchent pas au plan : on peut composer plusieurs collages.
     unsigned char *px = rep.bitmapData;
     int x0 = (int)NSMinX(dst), x1 = (int)NSMaxX(dst);
     int y0 = (int)NSMinY(dst), y1 = (int)NSMaxY(dst);
@@ -888,7 +638,6 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
             if (lum > 127) bright++;
         }
     }
-    // la figure est le camp minoritaire du rectangle
     int bright_is_figure = (bright <= opaque / 2);
 
     int plane = [CAMPalettePanel sharedPalette].currentPlane;
@@ -897,7 +646,7 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {
             unsigned char *p = px + (y * gw + x) * 4;
-            if (p[3] < 128) continue; // transparent : on ne touche pas
+            if (p[3] < 128) continue;
             int lum = (299 * p[0] + 587 * p[1] + 114 * p[2]) / 1000;
             int is_bright = (lum > 127);
             grids_a[plane & 3][y * gw + x] =
@@ -907,6 +656,5 @@ static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     memcpy(grids_b[plane & 3], grids_a[plane & 3], (size_t)gw * gh);
     [_camView renderFrame];
 }
-
 
 @end
