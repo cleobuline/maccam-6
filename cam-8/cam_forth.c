@@ -200,6 +200,21 @@ static int tokenize(const char *rule, char tokens[FORTH_MAX_TOKENS][32]) {
     strncpy(buf, rule, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
+    // Commentaire-ligne du Forth standard : un '\' ISOLE (entoure de
+    // blancs) neutralise tout jusqu'a la fin de la ligne. Efface avant
+    // la tokenisation, qui perd les fins de ligne (strtok_r coupe sur
+    // '\n'). Le test "isole" est indispensable : sans lui, un futur mot
+    // contenant une contre-oblique disparaitrait avec sa ligne.
+    // Les commentaires ( ... ) restent geres en aval, inchanges.
+    for (char *p = buf; *p; p++) {
+        if (*p != '\\') continue;
+        int at_start = (p == buf) || (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\n');
+        int isolated = (p[1] == '\0' || p[1] == ' ' || p[1] == '\t' || p[1] == '\n');
+        if (!at_start || !isolated) continue;
+        while (*p && *p != '\n') *p++ = ' ';
+        if (!*p) break;
+    }
+
     int count = 0;
     char *saveptr = NULL;
     char *token = strtok_r(buf, " \t\n", &saveptr);

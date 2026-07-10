@@ -36,6 +36,7 @@
 		4D09B8522FF2A56B0023B86D /* cam_8.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = cam_8.entitlements; sourceTree = "<group>"; };
 		4D1B6BEF2FFA6C7700DAEAAE /* fph.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = fph.h; sourceTree = "<group>"; };
 		4D1B6BF42FFA6D1D00DAEAAE /* fph.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = fph.c; sourceTree = "<group>"; };
+		4D1B6C052FFFE89A00DAEAAE /* cam-8.profdata */ = {isa = PBXFileReference; lastKnownFileType = file; path = "cam-8.profdata"; sourceTree = "<group>"; };
 		4D76C6542FF31B31001F8A3A /* cam_core.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = cam_core.h; sourceTree = "<group>"; };
 		4D76C6552FF31BCB001F8A3A /* cam_core.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = cam_core.c; sourceTree = "<group>"; };
 		4D76C6572FF31CB1001F8A3A /* CAMView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CAMView.h; sourceTree = "<group>"; };
@@ -65,6 +66,7 @@
 			children = (
 				4D09B8402FF2A5670023B86D /* cam-8 */,
 				4D09B83F2FF2A5670023B86D /* Products */,
+				4D1B6C042FFFE89A00DAEAAE /* OptimizationProfiles */,
 			);
 			sourceTree = "<group>";
 		};
@@ -104,6 +106,14 @@
 				4D09B8522FF2A56B0023B86D /* cam_8.entitlements */,
 			);
 			path = "cam-8";
+			sourceTree = "<group>";
+		};
+		4D1B6C042FFFE89A00DAEAAE /* OptimizationProfiles */ = {
+			isa = PBXGroup;
+			children = (
+				4D1B6C052FFFE89A00DAEAAE /* cam-8.profdata */,
+			);
+			path = OptimizationProfiles;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -326,6 +336,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_USE_OPTIMIZATION_PROFILE = YES;
 				CODE_SIGN_ENTITLEMENTS = "cam-8/cam_8.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -344,6 +355,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_USE_OPTIMIZATION_PROFILE = YES;
 				CODE_SIGN_ENTITLEMENTS = "cam-8/cam_8.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
