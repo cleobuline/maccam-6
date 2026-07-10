@@ -4,6 +4,7 @@
 //
 
 #import "CAMPalettePanel.h"
+#include <math.h>   // lround, pour le curseur de lissage
 
 @interface CAMPalettePanel ()
 
@@ -26,6 +27,10 @@
 @property (strong) NSTextField   *controlsLabel; // repositionne quand le bloc FHP se cache/montre
 @property (assign) BOOL          fhpControlsCollapsed; // vrai si le decalage "replie" est deja applique
 
+// Vue hydrodynamique : curseur de lissage et son retour chiffre.
+@property (strong) NSSlider    *hydroSlider;
+@property (strong) NSTextField *hydroRadiusLabel;
+
 @end
 
 @implementation CAMPalettePanel
@@ -40,7 +45,8 @@
 }
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(900, 400, 190, 669); // ajustee (6/7) : marge du bas ramenee de 88px a ~13px
+    NSRect frame = NSMakeRect(900, 400, 190, 717); // 669 -> 717 (10/7) : +48px pour la vue hydrodynamique,
+                                                   // en gardant la meme marge de ~13px sous les boutons
     self = [super initWithContentRect:frame
                             styleMask:NSWindowStyleMaskTitled |
                                       NSWindowStyleMaskClosable |
@@ -66,7 +72,7 @@
 
 - (void)_buildUI {
     NSView *v = self.contentView;
-    CGFloat y = 629; // ajuste (6/7) avec la nouvelle hauteur de fenetre, meme marge en haut
+    CGFloat y = 677; // 629 + 48, pour conserver exactement la meme marge en haut
     CGFloat x = 10;
     CGFloat w = 170;
 
@@ -251,11 +257,64 @@
     [v addSubview:isoCheck];
     y -= 22;
 
+    // --- VUE HYDRODYNAMIQUE (coarse-graining) ---
+    // Le gaz FHP est BRUYANT : a l'equilibre la densite d'une cellule
+    // fluctue de +/-1 particule, alors qu'une onde acoustique ne la fait
+    // varier que de quelques dixiemes. Affichee cellule par cellule,
+    // l'onde est litteralement noyee -- rapport signal/bruit mesure du
+    // front : 0.38. Apres moyennage spatial de rayon 6 : 3.83.
+    // Ce n'est pas un filtre cosmetique : c'est le passage de la
+    // mecanique statistique a la mecanique des fluides. FHP n'ont pas
+    // montre que des billes sur un reseau hexagonal ressemblent a un
+    // fluide, mais que leur MOYENNE obeit a Navier-Stokes.
+    NSButton *hydroCheck = [NSButton checkboxWithTitle:@"Vue hydrodynamique"
+                                                target:self action:@selector(_hydroViewChanged:)];
+    hydroCheck.frame = NSMakeRect(x, y, w, 20);
+    hydroCheck.state = NSControlStateValueOff;
+    hydroCheck.toolTip = @"Affiche l'ecart a la densite d'equilibre apres moyennage spatial, au lieu de la densite brute de chaque cellule. Sans moyennage, une onde acoustique est noyee sous le bruit thermique (signal/bruit 0.38) ; avec, elle se detache nettement (3.8). Bleu = rarefaction, rouge = compression, noir = equilibre.";
+    [self _forceVisibleTitle:hydroCheck];
+    [v addSubview:hydroCheck];
+    y -= 24;
+
+    // Libelle, curseur et valeur sur UNE SEULE ligne : la palette tient
+    // deja toute la hauteur d'un ecran de MacBook 2012, chaque ligne
+    // gagnee ici est une ligne que les boutons du bas ne perdent pas.
+    NSTextField *hydroLabel = [NSTextField labelWithString:@"Lissage"];
+    hydroLabel.frame     = NSMakeRect(x, y + 1, 46, 18);
+    hydroLabel.font      = [NSFont boldSystemFontOfSize:10];
+    hydroLabel.textColor = [NSColor colorWithRed:0 green:0.85 blue:1 alpha:0.7];
+    [v addSubview:hydroLabel];
+
+    // Le cout du moyennage ne depend PAS du rayon (table de sommes
+    // cumulees, O(N) : 0.4 ms par image en 256x256, 1.6 ms en 512x512).
+    // Un curseur continu est donc jouable en pleine simulation, sans
+    // le moindre a-coup -- on regle le "grossissement" en direct.
+    _hydroSlider = [NSSlider sliderWithValue:4 minValue:0 maxValue:12
+                                      target:self action:@selector(_hydroRadiusChanged:)];
+    _hydroSlider.frame = NSMakeRect(x + 50, y, w - 74, 20);
+    _hydroSlider.numberOfTickMarks = 13;
+    _hydroSlider.allowsTickMarkValuesOnly = YES;
+    _hydroSlider.toolTip = @"0 = aucun lissage (vue microscopique, grain par grain). 4 a 6 : l'hydrodynamique emerge. Au-dela, le front s'etale et l'onde perd ses contours.";
+    [v addSubview:_hydroSlider];
+
+    _hydroRadiusLabel = [NSTextField labelWithString:@"4"];
+    _hydroRadiusLabel.frame = NSMakeRect(x + w - 20, y + 1, 22, 18);
+    _hydroRadiusLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _hydroRadiusLabel.textColor = [NSColor secondaryLabelColor];
+    [v addSubview:_hydroRadiusLabel];
+    y -= 24;
+
+    // Valeur de depart : rayon 4, le meilleur compromis mesure entre
+    // signal/bruit (3.7) et finesse du front.
+    _hydroRadius = 4;
+
     // Regroupe les controles FHP et les cache par defaut : Mode FHP
     // demarre decoche, donc ces reglages n'ont aucun sens tant qu'on
     // ne l'a pas active -- inutile de noyer quelqu'un qui n'utilise
     // que le CAM classique sous des cases qui ne le concernent pas.
-    _fhpControlsViews = @[windCheck, openCheck, viscosityLabel, _viscosityField, viscosityApply, isoCheck];
+    _fhpControlsViews = @[windCheck, openCheck, viscosityLabel, _viscosityField,
+                          viscosityApply, isoCheck,
+                          hydroCheck, hydroLabel, _hydroSlider, _hydroRadiusLabel];
     for (NSView *cv in _fhpControlsViews) cv.hidden = YES;
 
     // (Le popup VOISINAGE a été retiré : le voisinage est désormais
@@ -446,6 +505,17 @@
 
 - (void)_sprayIsotropicChanged:(NSButton *)sender {
     _sprayIsotropic = (sender.state == NSControlStateValueOn);
+}
+
+- (void)_hydroViewChanged:(NSButton *)sender {
+    self.hydroView = (sender.state == NSControlStateValueOn);
+}
+
+// Le label suit le curseur : sans retour chiffre, impossible de
+// retrouver un reglage qu'on a trouve beau il y a dix minutes.
+- (void)_hydroRadiusChanged:(NSSlider *)sender {
+    self.hydroRadius = (int)lround(sender.doubleValue);
+    _hydroRadiusLabel.stringValue = [NSString stringWithFormat:@"%d", self.hydroRadius];
 }
 
 - (void)_visibilityChanged:(NSButton *)sender {

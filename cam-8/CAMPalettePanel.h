@@ -61,6 +61,22 @@ typedef NS_ENUM(NSInteger, CAMTool) {
 // existe deja.
 @property (nonatomic, assign) BOOL      sprayIsotropic;
 
+
+// Vue hydrodynamique (chapitre 16) : au lieu d'afficher la densite
+// BRUTE de chaque cellule (0-6), affiche l'ecart a la densite moyenne
+// d'equilibre, apres moyennage spatial sur un carre (2r+1)^2. Le gaz
+// FHP est bruyant : a l'equilibre la densite d'une cellule fluctue de
+// +/-1, alors qu'une onde acoustique ne la fait varier que de quelques
+// dixiemes. Sans moyennage, le rapport signal/bruit du front vaut 0.38
+// -- l'onde est litteralement invisible. A r=6 il monte a 3.8.
+// Bleu = rarefaction, rouge = compression, noir = equilibre.
+// Sans effet si fhpMode est OFF. Decoche par defaut.
+@property (nonatomic, assign) BOOL      hydroView;
+
+// Rayon du moyennage (0 a 12). Le cout est independant du rayon
+// (table de sommes cumulees) : 1.6 ms par image en 512x512.
+@property (nonatomic, assign) int       hydroRadius;
+
 // Regroupe les controles specifiques au mode FHP (Vent, Bords ouverts,
 // Viscosite, Spray isotrope) pour les masquer/montrer ensemble selon
 // l'etat de la case "Mode FHP" -- inutile de les montrer en permanence

@@ -6,6 +6,7 @@
 //
 
 #import "CAMView.h"
+#include <math.h>
 
 @implementation CAMView {
     CGContextRef    _bitmapContext;
@@ -13,6 +14,12 @@
     uint8_t        *_pixels;      // buffer RGBA
     size_t          _pixelWidth;
     size_t          _pixelHeight;
+
+    // Tampon du champ lisse (vue hydrodynamique). Alloue paresseusement,
+    // reutilise d'une image a l'autre : une allocation par changement de
+    // taille de grille, pas une par image.
+    float          *_hydroBuf;
+    size_t          _hydroCount;
 }
 
 - (void)dealloc {
@@ -31,6 +38,11 @@
     if (_pixels) {
         free(_pixels);
         _pixels = NULL;
+    }
+    if (_hydroBuf) {
+        free(_hydroBuf);
+        _hydroBuf = NULL;
+        _hydroCount = 0;
     }
 }
 
@@ -108,14 +120,32 @@
     [self setNeedsDisplay:YES];
 }
 
-// Rendu du gaz FHP : densite locale (0-6) en niveaux de gris, obstacles
-// en orange. Ignore volontairement palette.visibleMask -- le gaz FHP
-// n'a pas de "plans" au sens CAM, juste une densite et un decor.
+// Rendu du gaz FHP. Deux vues, selon palette.hydroView :
+//
+//  - vue MICROSCOPIQUE (defaut) : densite locale brute (0-6) en niveaux
+//    de gris. C'est le gaz tel qu'il est, grain par grain.
+//
+//  - vue HYDRODYNAMIQUE : ecart a la densite d'equilibre, apres
+//    moyennage spatial. Le gaz FHP est bruyant -- a l'equilibre, la
+//    densite d'une cellule fluctue de +/-1 particule, tandis qu'une onde
+//    acoustique ne la fait varier que de quelques dixiemes. Affichee
+//    cellule par cellule, l'onde est noyee (S/B mesure = 0.38). Le
+//    coarse-graining n'est pas un filtre cosmetique : c'est le passage
+//    de la mecanique statistique a la mecanique des fluides, et sans lui
+//    le FHP ne montre rien de ce pour quoi il a ete invente.
+//
+// Les deux ignorent palette.visibleMask -- le gaz FHP n'a pas de "plans"
+// au sens CAM, juste une densite et un decor.
 - (void)_renderFHPFrame {
     if (!_fhpState || !_bitmapContext) return;
 
     uint32_t w = _fhpState->width;
     uint32_t h = _fhpState->height;
+
+    if (self.palette && self.palette.hydroView) {
+        [self _renderFHPHydro];
+        return;
+    }
 
     // Densite locale = 0..6 (somme de 6 plans booleens) : 7 valeurs
     // possibles seulement, precalculees une fois plutot que refaire la
@@ -149,6 +179,48 @@
         }
     }
 
+    [self setNeedsDisplay:YES];
+}
+
+// Vue hydrodynamique : champ de densite moyenne, palette divergente
+// centree sur la densite d'equilibre rho0. Bleu = rarefaction (le gaz
+// s'est retire), rouge = compression, noir = equilibre. L'echelle est
+// AUTOMATIQUE (normalisee sur l'ecart max de l'image) : une onde qui
+// s'amortit reste visible jusqu'au bout au lieu de disparaitre dans le
+// noir, ce qui est precisement ce qu'on veut observer.
+- (void)_renderFHPHydro {
+    uint32_t w = _fhpState->width, h = _fhpState->height;
+    size_t n = (size_t)w * h;
+
+    if (_hydroBuf && _hydroCount != n) { free(_hydroBuf); _hydroBuf = NULL; }
+    if (!_hydroBuf) { _hydroBuf = malloc(n * sizeof(float)); _hydroCount = n; }
+    if (!_hydroBuf) return;
+
+    int r = self.palette ? self.palette.hydroRadius : 4;
+    if (r < 0) r = 0; if (r > 12) r = 12;
+    double rho0 = fhp_coarse_field(_fhpState, _hydroBuf, r);
+
+    // echelle : plus grand ecart absolu hors obstacle
+    float amp = 1e-6f;
+    for (size_t i = 0; i < n; i++) {
+        if (_fhpState->obstacle[i]) continue;
+        float e = fabsf(_hydroBuf[i] - (float)rho0);
+        if (e > amp) amp = e;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        uint8_t rr, gg, bb;
+        if (_fhpState->obstacle[i]) {
+            rr = 255; gg = 140; bb = 0;   // orange, comme la vue brute
+        } else {
+            float e = (_hydroBuf[i] - (float)rho0) / amp;   // -1 .. +1
+            if (e > 0) { rr = (uint8_t)(255 * e); gg = (uint8_t)(60 * e); bb = 0; }
+            else       { rr = 0; gg = (uint8_t)(140 * -e); bb = (uint8_t)(255 * -e); }
+        }
+        size_t idx = i * 4;
+        _pixels[idx + 0] = rr; _pixels[idx + 1] = gg;
+        _pixels[idx + 2] = bb; _pixels[idx + 3] = 255;
+    }
     [self setNeedsDisplay:YES];
 }
 

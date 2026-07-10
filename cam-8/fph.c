@@ -351,3 +351,49 @@ void fhp_step(FHPState *fhp) {
     fhp->rest_a = fhp->rest_b;
     fhp->rest_b = rtmp;
 }
+
+// Densite moyennee sur un carre (2r+1)^2, en O(N) via une table de
+// sommes cumulees. Le cout ne depend PAS du rayon : indispensable pour
+// laisser regler le lissage en direct sans faire chuter le nombre
+// d'images par seconde. Les bords sont traites par troncature de la
+// fenetre (pas de repliement torique : sur un canal a bords ouverts, le
+// gaz d'un bord n'a rien a voir avec celui de l'autre).
+double fhp_coarse_field(const FHPState *fhp, float *out, int radius) {
+    const int W = (int)fhp->width, H = (int)fhp->height;
+    if (radius < 0) radius = 0;
+
+    // sat[(y+1)*(W+1) + (x+1)] = somme des densites sur [0..y] x [0..x]
+    int32_t *sat = calloc((size_t)(W + 1) * (H + 1), sizeof(int32_t));
+    if (!sat) return 0.0;
+
+    for (int y = 0; y < H; y++) {
+        int32_t rowsum = 0;
+        for (int x = 0; x < W; x++) {
+            size_t i = (size_t)y * W + x;
+            int d = 0;
+            for (int k = 0; k < 6; k++) d += fhp->dir_a[k][i];
+            d += fhp->rest_a[i];              // les particules au repos comptent aussi
+            rowsum += d;
+            sat[(size_t)(y + 1) * (W + 1) + (x + 1)] =
+                sat[(size_t)y * (W + 1) + (x + 1)] + rowsum;
+        }
+    }
+    double total = (double)sat[(size_t)H * (W + 1) + W];
+
+    for (int y = 0; y < H; y++) {
+        int y0 = y - radius; if (y0 < 0) y0 = 0;
+        int y1 = y + radius; if (y1 > H - 1) y1 = H - 1;
+        for (int x = 0; x < W; x++) {
+            int x0 = x - radius; if (x0 < 0) x0 = 0;
+            int x1 = x + radius; if (x1 > W - 1) x1 = W - 1;
+            int32_t s = sat[(size_t)(y1 + 1) * (W + 1) + (x1 + 1)]
+                      - sat[(size_t)y0       * (W + 1) + (x1 + 1)]
+                      - sat[(size_t)(y1 + 1) * (W + 1) + x0]
+                      + sat[(size_t)y0       * (W + 1) + x0];
+            int n = (y1 - y0 + 1) * (x1 - x0 + 1);
+            out[(size_t)y * W + x] = (float)s / (float)n;
+        }
+    }
+    free(sat);
+    return total / (double)(W * H);
+}
