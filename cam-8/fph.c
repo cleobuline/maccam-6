@@ -91,12 +91,16 @@ FHPState *fhp_create(uint32_t width, uint32_t height) {
     for (int d = 0; d < 6; d++) {
         fhp->dir_a[d] = calloc(n, 1);
         fhp->dir_b[d] = calloc(n, 1);
-        if (!fhp->dir_a[d] || !fhp->dir_b[d]) ok = 0;
+        fhp->coll[d]  = calloc(n, 1);
+        if (!fhp->dir_a[d] || !fhp->dir_b[d] || !fhp->coll[d]) ok = 0;
     }
     fhp->obstacle = calloc(n, 1);
     fhp->rest_a = calloc(n, 1);
     fhp->rest_b = calloc(n, 1);
-    if (!fhp->obstacle || !fhp->rest_a || !fhp->rest_b) ok = 0;
+    // Les zeros sentinelles de la ligne 0 / colonne 0 sont poses ici, une
+    // fois pour toutes : rien ne les ecrase jamais.
+    fhp->sat = calloc((size_t)(width + 1) * (height + 1), sizeof(int32_t));
+    if (!fhp->obstacle || !fhp->rest_a || !fhp->rest_b || !fhp->sat) ok = 0;
 
     if (!ok) { fhp_destroy(fhp); return NULL; }
     return fhp;
@@ -107,10 +111,12 @@ void fhp_destroy(FHPState *fhp) {
     for (int d = 0; d < 6; d++) {
         free(fhp->dir_a[d]);
         free(fhp->dir_b[d]);
+        free(fhp->coll[d]);
     }
     free(fhp->obstacle);
     free(fhp->rest_a);
     free(fhp->rest_b);
+    free(fhp->sat);
     free(fhp);
 }
 
@@ -331,15 +337,15 @@ static void fhp_transport(FHPState *fhp, uint8_t *coll[6]) {
 }
 
 void fhp_step(FHPState *fhp) {
-    size_t n = (size_t)fhp->width * fhp->height;
-    uint8_t *coll[6];
-    for (int d = 0; d < 6; d++) coll[d] = malloc(n);
-
-    fhp_collide(fhp, coll); // ecrit aussi directement dans fhp->rest_b
-    fhp_transport(fhp, coll);
+    // Les tampons de collision appartiennent desormais a FHPState : plus
+    // aucune allocation dans le chemin chaud. fhp_collide ecrit les six
+    // plans en entier a chaque cellule (cas obstacle comme cas normal),
+    // donc aucun memset prealable n'est necessaire — le contenu du pas
+    // precedent est integralement recouvert.
+    fhp_collide(fhp, fhp->coll); // ecrit aussi directement dans fhp->rest_b
+    fhp_transport(fhp, fhp->coll);
 
     for (int d = 0; d < 6; d++) {
-        free(coll[d]);
         uint8_t *tmp = fhp->dir_a[d];
         fhp->dir_a[d] = fhp->dir_b[d];
         fhp->dir_b[d] = tmp;
@@ -358,12 +364,16 @@ void fhp_step(FHPState *fhp) {
 // d'images par seconde. Les bords sont traites par troncature de la
 // fenetre (pas de repliement torique : sur un canal a bords ouverts, le
 // gaz d'un bord n'a rien a voir avec celui de l'autre).
-double fhp_coarse_field(const FHPState *fhp, float *out, int radius) {
+double fhp_coarse_field(FHPState *fhp, float *out, int radius) {
     const int W = (int)fhp->width, H = (int)fhp->height;
     if (radius < 0) radius = 0;
 
-    // sat[(y+1)*(W+1) + (x+1)] = somme des densites sur [0..y] x [0..x]
-    int32_t *sat = calloc((size_t)(W + 1) * (H + 1), sizeof(int32_t));
+    // sat[(y+1)*(W+1) + (x+1)] = somme des densites sur [0..y] x [0..x].
+    // Scratch porte par FHPState (alloue une fois a la creation) : plus
+    // aucune allocation par image. La ligne 0 et la colonne 0 restent a
+    // zero depuis le calloc de fhp_create — la boucle ci-dessous ne les
+    // touche pas.
+    int32_t *sat = fhp->sat;
     if (!sat) return 0.0;
 
     for (int y = 0; y < H; y++) {
@@ -394,6 +404,5 @@ double fhp_coarse_field(const FHPState *fhp, float *out, int radius) {
             out[(size_t)y * W + x] = (float)s / (float)n;
         }
     }
-    free(sat);
     return total / (double)(W * H);
 }

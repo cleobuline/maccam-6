@@ -49,6 +49,29 @@ typedef struct {
     uint8_t *dir_a[6];
     uint8_t *dir_b[6];
 
+    // Tampons de travail de la phase de collision. Ils vivaient jusqu'ici
+    // dans fhp_step, alloues et liberes A CHAQUE PAS : 6 malloc + 6 free
+    // par image, soit des centaines d'allocations par seconde a 60 fps,
+    // pour des blocs de taille CONSTANTE et de duree de vie identique a
+    // celle de dir_a/dir_b. Aucune raison de les faire transiter par le
+    // tas a chaque tour : ils sont ici, alloues une fois pour toutes.
+    // (Pas de tampon statique : plusieurs FHPState peuvent coexister —
+    // grille visible + clone d'export — et se marcheraient dessus.)
+    uint8_t *coll[6];
+
+    // Table de sommes cumulees de fhp_coarse_field. Meme motif que
+    // coll[] : sa taille ne depend que de (width, height), fixes a la
+    // creation, mais elle etait allouee/liberee A CHAQUE APPEL — donc a
+    // chaque image des que la vue hydrodynamique est active. Sur 512x512
+    // cela faisait 1 Mo qui faisait l'aller-retour par le tas 60 fois
+    // par seconde.
+    // Subtilite : calloc ici suffit POUR TOUJOURS. La boucle de
+    // sommation ne remplit que les indices (y+1, x+1) ; la ligne 0 et la
+    // colonne 0 — les zeros sentinelles qui rendent la formule des
+    // quatre coins valable sur les bords — ne sont jamais ecrites par
+    // personne. Elles restent nulles a vie, aucun re-memset n'est requis.
+    int32_t *sat;
+
     // Obstacle (mur, cylindre...) : UN plan, non double-tamponne — le
     // decor ne bouge pas. Les particules qui l'atteignent rebondissent
     // (bounce-back complet, la condition aux limites classique pour
@@ -138,6 +161,10 @@ uint8_t  fhp_local_rest(const FHPState *fhp, uint32_t x, uint32_t y); // 0, 1 ou
 //
 // Retourne la densite moyenne globale (la "densite d'equilibre" rho0),
 // dont l'appelant a besoin comme point neutre de la palette divergente.
-double fhp_coarse_field(const FHPState *fhp, float *out, int radius);
+// Le gaz lui-meme n'est pas modifie ; le pointeur n'est plus `const`
+// seulement parce que la fonction ecrit dans le scratch `sat` porte par
+// FHPState (voir ci-dessus). Aucun appelant existant ne detient de
+// FHPState const, le changement est transparent.
+double fhp_coarse_field(FHPState *fhp, float *out, int radius);
 
 #endif

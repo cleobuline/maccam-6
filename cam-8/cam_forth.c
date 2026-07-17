@@ -836,19 +836,19 @@ static void custom_register_name(ForthVM *vm, const char *name, int idx) {
     }
 }
 
-int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {    char tokens[FORTH_MAX_TOKENS][32];
-    char buf[4096];
-    strncpy(buf, source, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+int forth_compile(ForthVM *vm, ForthTables *tables, const char *source) {
+    char tokens[FORTH_MAX_TOKENS][32];
 
-    int count = 0;
-    char *tok = strtok(buf, " \t\n");
-    while (tok != NULL && count < FORTH_MAX_TOKENS) {
-        strncpy(tokens[count], tok, 31);
-        tokens[count][31] = '\0';
-        count++;
-        tok = strtok(NULL, " \t\n");
-    }
+    // Passe par tokenize(), comme forth_eval_inner et les definitions de
+    // mots. Cette fonction reimplementait la meme boucle a la main —
+    // meme buffer, memes delimiteurs, meme troncature a 31 — mais SANS
+    // l'effacement des commentaires-ligne '\'. Resultat : un '\' dans
+    // une source compilee ici ne commentait rien du tout, son texte
+    // partait dans le flux de tokens et se faisait interpreter comme du
+    // code, alors que le MEME commentaire dans le corps d'un mot (donc
+    // passe par tokenize) disparaissait correctement. Au passage on
+    // recupere strtok_r a la place de strtok : plus d'etat global.
+    int count = tokenize(source, tokens);
 
     int built = 0;
     int i = 0;
